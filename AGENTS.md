@@ -23,18 +23,19 @@ Personal pipeline that scrapes Instagram Reels (Apify), ingests media (yt-dlp + 
 
 - Creator lists live in `System/creators.json` — edit that file, never hardcode usernames in scripts.
 - One-off reel: `uv run System/ingest_reel.py <reel_url>` then `uv run System/transcribe.py --shortcode <id>`.
+- Telegram reels: `/tg` — fetches links from your Telegram chat, dedup by shortcode, feeds into the same pipeline (Status=SCRAPED, Source=TELEGRAM in Excel).
 - Status lifecycle: `SCRAPED → PROCESSED (keyframes + .wav + .txt on disk; .mp4 pruned) → ANALYZED (media safe to delete)`.
 
 ## opencode wiring (`.opencode/`)
 
-- **Subagents** (`.opencode/agent/`): `reel-ingestor` (bash), `reel-analyst`, `pattern-librarian`, `script-drafter`, `style-critic`. Rationale + mapping from the original 8-agent design: `.agents/AGENTS.md`.
+- **Subagents** (`.opencode/agent/`): `reel-ingestor` (bash), `reel-analyst`, `pattern-librarian`, `script-drafter`, `style-critic`, `telegram-agent` (bash+edit). Rationale + mapping from the original 8-agent design: `.agents/AGENTS.md`.
 - **Commands** (`.opencode/command/`):
   - `/draft <topic>` — 2–3 script drafts from the Brain (smart defaults; asks only if ambiguous).
   - `/redraft <reel_url>` — ingest → analyze → 2–3 niche-adapted redrafts.
   - `/refine <script>` — critique + refined draft vs rubric & My_Style.
   - `/analyze [shortcode|pending]` — parallel analysis of unanalyzed reels.
   - `/sync [NICHE|BRANDING|ALL]` — the full pipeline end-to-end.
-  - `uv run System/telegram_bot.py` — local Telegram long-polling interface for the commands above.
+  - `/tg [--dry-run] [--status]` — fetch reel links from Telegram chat, dedup, feed into pipeline.
 - Skills live in `.agents/skills/` (registered via `skills.paths` in `.opencode/opencode.json`): `video-analysis`, `audio-analysis`, `advanced-reel-script-structure`.
 
 ## Brain map (Obsidian wiki-linked `[[…]]`)
@@ -75,6 +76,7 @@ Drafts are saved to `Brain/Scripts/<Title>.md` in the established format (metada
 | Distilling patterns into Brain | `pattern-librarian` |
 | Writing script drafts | `script-drafter` |
 | Refining user-pasted scripts | `style-critic` |
+| Fetching reel links from Telegram | `telegram-agent` |
 
 ### Parallel Spawning
 - When a command says "IN PARALLEL" (e.g. up to 4 `reel-analyst` in `/analyze`), batch ALL parallel spawns in a SINGLE `task` tool call block. Do not spawn them sequentially in the main context.

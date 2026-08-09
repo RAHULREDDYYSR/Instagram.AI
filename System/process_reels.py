@@ -121,14 +121,14 @@ def delete_reel_assets(video_id: str) -> int:
 def create_niche_note(shortcode: str, row: dict) -> str:
     """Brain/Reels/<sc>.md — focus: hook, visuals, pacing, topic ideas."""
     note_path = os.path.join(REELS_BRAIN_DIR, f"{shortcode}.md")
-    creator   = row.get("Creator Name", "")
-    username  = row.get("Username", "")
-    reel_url  = row.get("Reel Link", "")
-    caption   = row.get("Caption", "")
-    pub_date  = row.get("Publication Date", "")
+    creator   = str(row.get("Creator Name", "") or "")
+    username  = str(row.get("Username", "") or "").strip()
+    reel_url  = str(row.get("Reel Link", "") or "")
+    caption   = str(row.get("Caption", "") or "")
+    pub_date  = str(row.get("Publication Date", "") or "")
     likes     = row.get("Like Count", 0)
     comments  = row.get("Comments Count", 0)
-    shares    = row.get("Shares Count", "")
+    shares    = str(row.get("Shares Count", "") or "")
     now       = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
     note = f"""# Reel: {shortcode}
@@ -211,7 +211,7 @@ def create_niche_note(shortcode: str, row: dict) -> str:
 _Add tags after analysis: #hook-type #editing-style #topic_
 
 ## Links
-- Creator: [[{username.lstrip('@')}]]
+- Creator: [[{username.lstrip('@') if username else 'unknown'}]]
 - [[Pattern_Library]]
 - [[Hook_Database]]
 - [[Playbook]]
@@ -225,14 +225,14 @@ _Add tags after analysis: #hook-type #editing-style #topic_
 def create_branding_note(shortcode: str, row: dict) -> str:
     """Brain/Branding/<sc>.md — focus: script structure, CTA, audience targeting."""
     note_path = os.path.join(BRAND_BRAIN_DIR, f"{shortcode}.md")
-    creator   = row.get("Creator Name", "")
-    username  = row.get("Username", "")
-    reel_url  = row.get("Reel Link", "")
-    caption   = row.get("Caption", "")
-    pub_date  = row.get("Publication Date", "")
+    creator   = str(row.get("Creator Name", "") or "")
+    username  = str(row.get("Username", "") or "").strip()
+    reel_url  = str(row.get("Reel Link", "") or "")
+    caption   = str(row.get("Caption", "") or "")
+    pub_date  = str(row.get("Publication Date", "") or "")
     likes     = row.get("Like Count", 0)
     comments  = row.get("Comments Count", 0)
-    shares    = row.get("Shares Count", "")
+    shares    = str(row.get("Shares Count", "") or "")
     now       = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
     note = f"""# Branding Reel: {shortcode}
@@ -332,7 +332,7 @@ def create_branding_note(shortcode: str, row: dict) -> str:
 ---
 
 ## Links
-- Creator: [[{username.lstrip('@')}]]
+- Creator: [[{username.lstrip('@') if username else 'unknown'}]]
 - [[Script_Framework_Library]]
 - [[Personal_Brand_Playbook]]
 - [[Audience_Targeting_Guide]]
@@ -427,7 +427,7 @@ def update_registry_processed(shortcode: str) -> None:
 # ---------------------------------------------------------------------------
 def main(category_filter: str = "ALL", limit: int = 0, workers: int = 3,
          delete_assets: bool = False, skip_transcribe: bool = False,
-         username: str = "") -> None:
+         username: str = "", shortcode: str = "") -> None:
     df = load_sheet()
 
     # Filter by status
@@ -444,6 +444,11 @@ def main(category_filter: str = "ALL", limit: int = 0, workers: int = 3,
         user_mask = df["Username"].astype(str).str.lower() == f"@{handle}"
         pending_mask = pending_mask & user_mask
 
+    # Filter by shortcode if specified
+    if shortcode:
+        sc_mask = df["Shortcode"].astype(str).str.strip() == shortcode
+        pending_mask = pending_mask & sc_mask
+
     pending = df[pending_mask]
 
     if pending.empty:
@@ -452,6 +457,8 @@ def main(category_filter: str = "ALL", limit: int = 0, workers: int = 3,
             parts.append(f"category={category_filter}")
         if username:
             parts.append(f"@{username.lstrip('@')}")
+        if shortcode:
+            parts.append(f"shortcode={shortcode}")
         scope = f"[{', '.join(parts)}]" if parts else ""
         print(f"\n[INFO] No SCRAPED reels found {scope}.")
         print(f"       Run 'uv run System/scrape.py' first.")
@@ -462,6 +469,8 @@ def main(category_filter: str = "ALL", limit: int = 0, workers: int = 3,
     scope_parts = [f"category={category_filter}"]
     if username:
         scope_parts.append(f"@{username.lstrip('@')}")
+    if shortcode:
+        scope_parts.append(f"shortcode={shortcode}")
     print(f"\n[PROCESS] {total} reels pending  |  {' | '.join(scope_parts)}  |  cap={cap}")
     print(f"[PARALLEL] {workers} download threads  |  assets kept for analysis")
     print(f"{'='*60}")
@@ -530,7 +539,10 @@ if __name__ == "__main__":
                         help="Do not chain into transcribe.py")
     parser.add_argument("--username", default="",
                         help="Process only this creator handle (filter on Username column)")
+    parser.add_argument("--shortcode", default="",
+                        help="Process a single reel by shortcode")
     args = parser.parse_args()
     main(category_filter=args.category.upper(), limit=args.limit,
          workers=args.workers, delete_assets=args.delete_assets,
-         skip_transcribe=args.skip_transcribe, username=args.username)
+         skip_transcribe=args.skip_transcribe, username=args.username,
+         shortcode=args.shortcode)

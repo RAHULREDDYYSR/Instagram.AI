@@ -1,5 +1,6 @@
 import os
 import sys
+import argparse
 import subprocess
 from urllib.parse import urlparse
 
@@ -19,7 +20,7 @@ def get_video_id(url):
             pass
     return "unknown_video"
 
-def download_reel(url, output_dir):
+def download_reel(url, output_dir, cookies_path=None):
     video_id = get_video_id(url)
     base_name = os.path.join(output_dir, video_id)
     
@@ -31,6 +32,9 @@ def download_reel(url, output_dir):
         'no_warnings': True,
         'extract_flat': False,
     }
+
+    if cookies_path:
+        ydl_opts['cookiefile'] = cookies_path
 
     print(f"Downloading {url}...")
     try:
@@ -69,11 +73,18 @@ def extract_assets(video_path, output_dir, video_id):
     }
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python ingest_reel.py <instagram_reel_url>")
+    parser = argparse.ArgumentParser(description="Ingest an Instagram Reel into the Assets directory.")
+    parser.add_argument("url", help="Instagram Reel URL")
+    parser.add_argument("--cookies", dest="cookies", default=None,
+                        help="Path to a cookies.txt file to pass to yt-dlp as cookiefile")
+    args = parser.parse_args()
+
+    url = args.url
+    cookies_path = args.cookies
+
+    if cookies_path and not os.path.exists(cookies_path):
+        print(f"Error: cookies file not found at '{cookies_path}'")
         sys.exit(1)
-        
-    url = sys.argv[1]
     
     # Setup directories
     workspace = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -81,7 +92,7 @@ if __name__ == "__main__":
     os.makedirs(assets_dir, exist_ok=True)
     
     # Download and extract
-    video_path, video_id = download_reel(url, assets_dir)
+    video_path, video_id = download_reel(url, assets_dir, cookies_path=cookies_path)
     if video_path:
         assets = extract_assets(video_path, assets_dir, video_id)
         print("\n--- Asset Paths ---")

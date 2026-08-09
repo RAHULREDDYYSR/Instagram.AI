@@ -21,6 +21,9 @@ Generates 2–3 ready-to-shoot drafts on a topic (or adapted from a source reel'
 ### `style-critic` (edit allow / bash deny)
 Refines user-pasted scripts: diagnosis vs `Brain/Rubric.md`, refined draft (keeps the user's idea — sharpens it), change log with per-change rationale. Proposes `Brain/My_Style.md` updates and applies them only after explicit user approval.
 
+### `telegram-agent` (bash allow / edit allow)
+Fetches Instagram reel links from your Telegram chat, deduplicates by shortcode, detects draft requests, and feeds reels into the existing pipeline. Calls `telegram_bot/fetch_messages.py` (one-shot `getUpdates` API call — no long-polling bot), stores results in `telegram_bot/telegram_reels.json` + syncs to `Brain/Reels_Log.xlsx` (Source=TELEGRAM). Presents suggestions to user, then orchestrates the same agents as `/sync`: `reel-ingestor` → `reel-analyst` → `pattern-librarian` → (optionally) `script-drafter` → `pdf-builder` → `telegram_bot/send_file.py` to deliver PDFs back to the chat. Timeline tracking via `last_update_id` offset ensures no message is read twice.
+
 ## Commands (`.opencode/command/`)
 
 | Command | Flow |
@@ -30,6 +33,7 @@ Refines user-pasted scripts: diagnosis vs `Brain/Rubric.md`, refined draft (keep
 | `/refine <script>` | `style-critic` → diagnosis + refined draft + change log. My_Style edits need approval. |
 | `/analyze [shortcode\|pending]` | Up to 4 `reel-analyst` subagents in parallel → `mark_analyzed.py` → `pattern-librarian` for the batch. |
 | `/sync [NICHE\|BRANDING\|ALL]` | scrape → process → transcribe → parallel analyze → distill, end to end. |
+| `/tg [--dry-run] [--status]` | `telegram-agent` → fetch reel links from Telegram chat, dedup, detect draft requests, feed into pipeline. |
 
 ## Mapping from the original 8-agent design
 
@@ -42,6 +46,7 @@ Refines user-pasted scripts: diagnosis vs `Brain/Rubric.md`, refined draft (keep
 | Knowledge Graph Agent | `pattern-librarian` |
 | Script Generator Agent | `script-drafter` |
 | Feedback Evolution Agent | `style-critic` |
+| Telegram Input Agent | `telegram-agent` |
 
 ## Invariants
 

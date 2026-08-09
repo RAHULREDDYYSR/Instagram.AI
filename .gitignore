@@ -12,9 +12,6 @@ wheels/
 # Generated PDFs
 draft_result/
 
-# Local Telegram runtime files
-.runtime/
-
 # Secrets — never commit
 .env
 System/cookies.txt
@@ -25,6 +22,9 @@ Assets/
 # Personal Brain notes, analyses, generated scripts — keep local, never commit
 Brain/
 Scripts/
+
+# Telegram bot runtime state
+telegram_bot/telegram_reels.json
 
 # Local opencode session/config
 .opencode/
