@@ -1,0 +1,30 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Generated PDFs
+draft_result/
+
+# Local Telegram runtime files
+.runtime/
+
+# Secrets — never commit
+.env
+System/cookies.txt
+
+# Scraped media (Apify downloads, keyframes, audio) — keep local, never commit
+Assets/
+
+# Personal Brain notes, analyses, generated scripts — keep local, never commit
+Brain/
+Scripts/
+
+# Local opencode session/config
+.opencode/
