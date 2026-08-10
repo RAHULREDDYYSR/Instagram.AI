@@ -7,7 +7,7 @@ The agents are REAL opencode subagents defined in `.opencode/agent/*.md` and inv
 ## Real subagents (`.opencode/agent/`)
 
 ### `reel-ingestor` (bash allow / edit deny)
-Runs the deterministic pipeline scripts only: `System/scrape.py`, `System/process_reels.py`, `System/transcribe.py`, `System/ingest_reel.py`, `System/mark_analyzed.py`, `System/cleanup_assets.py`. Never hand-edits Brain files or the Excel log. Reports asset paths and failures.
+Runs the deterministic pipeline scripts only: `System/scrape.py`, `System/register_oneoff.py`, `System/process_reels.py`, `System/transcribe.py`, `System/ingest_reel.py`, `System/preflight.py`, `System/mark_analyzed.py`, `System/cleanup_assets.py`. Never hand-edits Brain files or the Excel log. Reports verified asset paths and failures.
 
 ### `reel-analyst` (edit allow / bash deny)
 Analyzes ONE reel: reads every keyframe (`Assets/<id>_keyframe_*.jpg` — its primary visual evidence), the Whisper transcript (`Assets/<id>.txt`), and the reel's Brain note. Uses the `video-analysis` and `audio-analysis` skills, scores retention against the FIXED `Brain/Rubric.md`, writes `Brain/Analyses/<id>_{visual.json,audio.md,retention.md}`, and fills the reel's Brain note. Flags genuinely novel patterns. Spawn several in parallel for throughput (see `/analyze`).
@@ -29,11 +29,11 @@ Fetches Instagram reel links from your Telegram chat, deduplicates by shortcode,
 | Command | Flow |
 |---|---|
 | `/draft <topic>` | Smart defaults (30s, 3 drafts, SAVE CTA) → `script-drafter` → 2–3 drafts. Asks clarifying questions only when genuinely ambiguous. |
-| `/redraft <reel_url>` | `reel-ingestor` → `reel-analyst` → `pattern-librarian` (if novel) → `script-drafter` (2–3 niche-adapted redrafts). |
+| `/redraft <reel_url>` | register/process → `reel-analyst` → frozen brief + parallel `pattern-librarian` and isolated `script-drafter` agents → validated PDF. |
 | `/refine <script>` | `style-critic` → diagnosis + refined draft + change log. My_Style edits need approval. |
-| `/analyze [shortcode\|pending]` | Up to 4 `reel-analyst` subagents in parallel → `mark_analyzed.py` → `pattern-librarian` for the batch. |
+| `/analyze [shortcode\|pending]` | Exact transcript/preflight → up to 4 `reel-analyst` subagents in parallel → scoped `mark_analyzed.py` and one batch `pattern-librarian`. |
 | `/sync [NICHE\|BRANDING\|ALL]` | scrape → process → transcribe → parallel analyze → distill, end to end. |
-| `/tg [--dry-run] [--status]` | `telegram-agent` → fetch reel links from Telegram chat, dedup, detect draft requests, feed into pipeline. |
+| `/tg [--dry-run] [--status]` | `telegram-agent` → fetch reel links, dedup, preserve exact shortcode manifest, process/analyze, update Telegram status, and optionally draft validated PDFs. |
 
 ## Mapping from the original 8-agent design
 

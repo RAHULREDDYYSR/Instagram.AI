@@ -1,6 +1,19 @@
-"""Premium PDF of 3 reel scripts — v5 luxury edition."""
+"""Premium PDF of 1–3 reel scripts — v5 luxury edition (generic build_pdf).
+
+The premium renderer is exposed as build_pdf(script_paths, output_path,
+topic=None) and via a flexible CLI (--scripts / --output / --topic). It
+dynamically parses every script file (title, length, pillars, score, core
+concept, hook teaser) instead of hardcoding filenames, titles, stats,
+subtitles or hooks.
+
+Legacy no-argument default (running with no flags) keeps the two-script
+selection in SCRIPTS/OUTPUT below.
+"""
 from pathlib import Path
+import argparse
 import re
+import sys
+from datetime import date
 from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
@@ -11,9 +24,9 @@ from reportlab.platypus import (
 )
 from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
 
-SCRIPTS = ["The_Bravest_Lift.md", "The_Quiet_Hour.md", "Stop_Performing.md"]
+SCRIPTS = ["The_Two_Bodies_You_Were_Chasing_At_16.md", "The_Two_Men_You_Wanted_To_Become.md"]
 SCRIPTS_DIR = Path("Brain/Scripts")
-OUTPUT = Path("Brain/Scripts/_Compiled_Scripts_Sample.pdf")
+OUTPUT = Path("Brain/Scripts/_pdfs/The_Two_Bodies__The_Two_Men.pdf")
 
 # ── Premium palette ──
 CREAM   = HexColor("#fbf9f4")
@@ -103,9 +116,26 @@ def build_styles():
     }
 
 # ── Cover ──
-def cover_page(story, styles):
+def _avg_stat(metas, key, convert, fmt):
+    """Mean of a parsed stat across scripts; '—' when none are available."""
+    vals = []
+    for m in metas:
+        v = m.get(key)
+        if v is None or v == "":
+            continue
+        try:
+            vals.append(convert(v))
+        except (TypeError, ValueError):
+            continue
+    if not vals:
+        return "\u2014"
+    return fmt(sum(vals) / len(vals))
+
+def cover_page(story, styles, metas, topic=None):
+    n = len(metas)
     story.append(Spacer(1,0.25*inch))
-    story.append(Paragraph("VOLUME I  \u00b7  AUGUST 2026",styles["cover_tag"]))
+    story.append(Paragraph("VOLUME I  \u00b7  " + date.today().strftime("%B %Y").upper(),
+                           styles["cover_tag"]))
     story.append(Spacer(1,0.35*inch))
     story.append(Paragraph("REEL SCRIPT",styles["cover_h1"]))
     story.append(Paragraph("PLAYBOOK",styles["cover_h2"]))
@@ -114,12 +144,19 @@ def cover_page(story, styles):
                  style=TableStyle([("BACKGROUND",(0,0),(-1,-1),GOLD)]))
     story.append(rule)
     story.append(Spacer(1,0.12*inch))
-    story.append(Paragraph("Three ready-to-shoot scripts. Distilled from the pipeline.",styles["cover_sub"]))
+    sub = f"{n} ready-to-shoot script{'s' if n != 1 else ''}. Distilled from the pipeline."
+    if topic:
+        topic_clean = strip_emoji(topic).strip()
+        if topic_clean:
+            sub += "  \u00b7  " + esc(topic_clean)
+    story.append(Paragraph(sub,styles["cover_sub"]))
     story.append(Spacer(1,0.25*inch))
+    avg_len   = _avg_stat(metas, "length_secs", int,   lambda v: f"{v:.0f}s")
+    avg_score = _avg_stat(metas, "score",        float, lambda v: f"{v:.1f}")
     stats = Table([[
-        Paragraph("3",styles["stat_num"]),
-        Paragraph("30s",styles["stat_num"]),
-        Paragraph("6.4",styles["stat_num"]),
+        Paragraph(str(n),styles["stat_num"]),
+        Paragraph(avg_len,styles["stat_num"]),
+        Paragraph(avg_score,styles["stat_num"]),
     ],[
         Paragraph("scripts",styles["stat_lbl"]),
         Paragraph("avg. length",styles["stat_lbl"]),
@@ -140,12 +177,13 @@ def cover_page(story, styles):
     story.append(rule2)
     story.append(Spacer(1,0.2*inch))
     toc_rows = []
-    for i,name in enumerate(SCRIPTS,1):
-        title = name[:-3].replace("_"," ")
+    for i,meta in enumerate(metas,1):
+        meta_line = "  \u00b7  ".join(x for x in
+                                      (meta["length_label"], meta["pillars"]) if x)
         toc_rows.append([
             Paragraph(f'{i:02d}',styles["toc_num"]),
-            Paragraph(title,styles["toc_title"]),
-            Paragraph("30s  \u00b7  lifestyle",styles["toc_meta"]),
+            Paragraph(esc(strip_emoji(meta["title"])),styles["toc_title"]),
+            Paragraph(esc(meta_line) if meta_line else "\u2014",styles["toc_meta"]),
         ])
     toc = Table(toc_rows,colWidths=[0.6*inch,4.2*inch,2.7*inch])
     toc.setStyle(TableStyle([
@@ -167,14 +205,16 @@ def section_header(title, subtitle, story, styles, score, hook):
     story.append(bar)
     story.append(Spacer(1,0.2*inch))
     story.append(Paragraph("SCRIPT",styles["kicker"]))
-    story.append(Paragraph(title,styles["script_title"]))
+    story.append(Paragraph(esc(strip_emoji(title)),styles["script_title"]))
     if subtitle:
-        story.append(Paragraph(subtitle,styles["script_sub"]))
+        story.append(Paragraph(esc(subtitle),styles["script_sub"]))
     story.append(Spacer(1,0.14*inch))
     # Score + hook callout
+    score_disp = score if score else "\u2014"
+    hook_text = f'<i>&ldquo;{esc(hook)}&rdquo;</i>' if hook else ""
     callout = Table([[
-        Paragraph(f'<font color="{GOLD.hexval()}">{score}</font>&nbsp;<font color="#5a5c64">/10</font>',styles["big_score"]),
-        Paragraph(f'<i>&ldquo;{hook}&rdquo;</i>',styles["hook_teaser"]),
+        Paragraph(f'<font color="{GOLD.hexval()}">{score_disp}</font>&nbsp;<font color="#5a5c64">/10</font>',styles["big_score"]),
+        Paragraph(hook_text,styles["hook_teaser"]),
     ]],colWidths=[1.6*inch,5.9*inch])
     callout.setStyle(TableStyle([
         ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
@@ -187,14 +227,135 @@ def section_header(title, subtitle, story, styles, score, hook):
     story.append(callout)
     story.append(Spacer(1,0.2*inch))
 
-def extract_highlights(md,default_score="6.0"):
-    sm = re.search(r"Overall Retention Score:\s*([\d.]+)\s*/\s*10",md)
-    score = sm.group(1) if sm else default_score
-    hm = re.search(r'### 0:00\u20130:03\s*\n\*\*Voice:\*\*\s*"([^"]+)"',md)
-    if not hm:
-        hm = re.search(r'### 0:00\u20130:03\s*\n\*\*Voice:\*\*\s*\"([^\"]+)\"',md)
-    hook = hm.group(1) if hm else ""
-    return score,hook
+# ── Dynamic source parsing (1–3 scripts, dash variants normalized) ──
+TS_DASH = r"[–—\-]"   # en dash / em dash / hyphen
+
+_TS_BLOCK_RE = re.compile(
+    r"^#{2,3}\s+(\d+:\d{2})\s*" + TS_DASH + r"\s*(\d+:\d{2})\s*$", re.MULTILINE)
+
+def _ts_blocks(md):
+    """Yield (start, end, body) for every '### M:SS–M:SS' block."""
+    for m in _TS_BLOCK_RE.finditer(md):
+        end = m.end()
+        body_m = re.search(r"(?P<body>.*?)(?=^#{2,3}\s|\Z)", md[end:],
+                           re.MULTILINE | re.DOTALL)
+        yield m.group(1), m.group(2), (body_m.group("body") if body_m else "")
+
+def extract_hook(md):
+    """Hook teaser = the **Voice:** line of the first timestamp block.
+
+    Duration-agnostic: matches '0:00–0:03', '0:00–0:04', … across en/em
+    dash and hyphen variants, and prefers a block that starts at 0:00.
+    """
+    blocks = list(_ts_blocks(md))
+    if not blocks:
+        return ""
+    body = next((b for s, e, b in blocks if s == "0:00"), blocks[0][2])
+    vm = re.search(r'\*\*Voice:\*\*\s*"([^"]+)"', body)
+    if not vm:
+        vm = re.search(r'(?m)^Voice:\s*"([^"]+)"', body)   # legacy label
+    return vm.group(1).strip() if vm else ""
+
+def parse_score(md):
+    # Prefer the rubric-derived 'Overall Retention Score' (matches preflight's
+    # own scoring logic and the legacy extract_highlights). Falls back to the
+    # metadata 'Estimated Performance Score'. Handles both bold placements:
+    # '**Overall Retention Score: 7.4 / 10**', '**Estimated Performance
+    # Score:** 8.2 / 10' and '**Estimated Performance Score**: 8.5/10 (…)'.
+    for label in (r"Overall\s+Retention\s+Score",
+                  r"Estimated\s+Performance\s+Score"):
+        m = re.search(label + r"\s*\**:\**\s*([\d.]+)\s*/\s*10", md, re.IGNORECASE)
+        if m:
+            return m.group(1)
+    return ""
+
+def parse_length(md):
+    """(seconds:int, label:str) from a declared **Length** field, or (None,'')."""
+    m = re.search(r"\*\*Length\s*\(s\):\*\*\s*(\d+)", md)
+    if m:
+        s = int(m.group(1)); return s, f"{s}s"
+    m = re.search(r"\*\*Length:\*\*[^\n]*?\((\d+):(\d{2})[^)]*?" + TS_DASH +
+                  r"\s*(\d+):(\d{2})\)", md)
+    if m:
+        s = int(m.group(3)) * 60 + int(m.group(4)); return s, f"{s}s"
+    return None, ""
+
+def _last_ts_end(md):
+    ends = [int(e.split(":")[0]) * 60 + int(e.split(":")[1])
+            for _s, e, _b in _ts_blocks(md)]
+    return max(ends) if ends else None
+
+def parse_pillars(md):
+    m = re.search(r"\*\*Pillars?\*?:\*\*\s*([^\n]+)", md)
+    return m.group(1).strip() if m else ""
+
+def parse_title(md, path):
+    m = re.search(r"^\s*[-*]\s*\*\*Title:\*\*\s*([^\n]+)", md, re.MULTILINE)
+    if not m:
+        m = re.search(r"(?m)^#\s+(?:Script\s*Draft:?\s*|Script:?\s*)?(.+?)\s*$", md)
+    if m:
+        return re.sub(r"[\s_]+", " ", m.group(1)).strip()
+    return Path(path).stem.replace("_", " ")
+
+def parse_core(md):
+    m = re.search(r"\*\*Core\s+Concept:\*\*\s*([^\n]+)", md)
+    return m.group(1).strip() if m else ""
+
+def parse_meta(path):
+    """Parse title/length/pillars/score/core/hook from one script file.
+
+    Fallbacks (filename-derived title, timestamp-derived length, '—' score)
+    are explicit and reported on stderr — never silent 'Untitled' labels.
+    """
+    md = Path(path).read_text(encoding="utf-8")
+    warnings = []
+    title = parse_title(md, path)
+    used_filename = (
+        not re.search(r"^\s*[-*]\s*\*\*Title:\*\*", md, re.MULTILINE) and
+        not re.search(r"(?m)^#\s+", md)
+    )
+    if used_filename:
+        warnings.append(
+            f"  [fallback] {path}: no '# Script' or '**Title:**' heading; "
+            f"used filename-derived title {title!r}")
+    secs, label = parse_length(md)
+    if secs is None:
+        last = _last_ts_end(md)
+        if last is not None:
+            secs, label = last, f"{last}s"
+            warnings.append(
+                f"  [fallback] {path}: no declared length; derived {label} "
+                f"from the last timestamp block")
+    score = parse_score(md)
+    if not score:
+        warnings.append(
+            f"  [fallback] {path}: no Overall/Estimated score found; cover shows '\u2014'")
+    return {
+        "path": str(path),
+        "title": title,
+        "length_secs": secs,
+        "length_label": label,
+        "score": score,
+        "pillars": parse_pillars(md),
+        "core": parse_core(md),
+        "hook": extract_hook(md),
+        "md": md,
+    }, warnings
+
+def make_subtitle(meta):
+    """Section subtitle: core-concept first sentence + 'length · pillars'."""
+    parts = []
+    core = (meta.get("core") or "").strip()
+    if core:
+        core_short = re.split(r"(?<=[.!?])\s+", core, maxsplit=1)[0]
+        if len(core_short) > 200:
+            core_short = core_short[:197].rstrip() + "\u2026"
+        parts.append(core_short)
+    tail = " \u00b7 ".join(x for x in (meta.get("length_label") or "",
+                                       meta.get("pillars") or "") if x)
+    if tail:
+        parts.append(tail)
+    return " \u00b7 ".join(parts)
 
 # ── Markdown → flowables ──
 def md_to_flowables(md_text,styles,skip_first_h1=False):
@@ -224,7 +385,7 @@ def md_to_flowables(md_text,styles,skip_first_h1=False):
             flush_ts(); flow.append(Spacer(1,4)); i+=1; continue
 
         # Timestamp heading — start a KeepTogether block
-        m = re.match(r"^###\s+(0?[\d:]+\u2013[\d:]+)\s*$",raw)
+        m = re.match(r"^###\s+(0?[\d:]+\s*[–—\-]\s*[\d:]+)\s*$", raw)
         if m:
             flush_ts()
             ts = m.group(1)
@@ -414,45 +575,87 @@ class PageDeco:
         canv.restoreState()
 
 # ── Main ──
-def main():
-    styles=build_styles()
-    margin=1*inch
-    doc=BaseDocTemplate(
-        str(OUTPUT),pagesize=LETTER,
-        leftMargin=margin,rightMargin=margin,
-        topMargin=0.85*inch,bottomMargin=0.7*inch,
-        title="Instagram.AI - Script Sample",author="Instagram.AI",
+def build_pdf(script_paths, output_path, topic=None):
+    """Build the premium playbook PDF from 1–3 script markdown files.
+
+    script_paths : iterable of paths to script .md files
+    output_path  : destination PDF path (any extension, parent created)
+    topic        : optional topic line shown on the cover
+    Returns the output path. Fallback-parsing warnings go to stderr.
+    """
+    metas, warnings = [], []
+    for p in script_paths:
+        meta, ws = parse_meta(p)
+        metas.append(meta)
+        warnings.extend(ws)
+    for w in warnings:
+        print(w, file=sys.stderr)
+
+    styles = build_styles()
+    margin = 1 * inch
+    doc = BaseDocTemplate(
+        str(output_path), pagesize=LETTER,
+        leftMargin=margin, rightMargin=margin,
+        topMargin=0.85 * inch, bottomMargin=0.7 * inch,
+        title="Instagram.AI - Script Sample", author="Instagram.AI",
     )
 
-    story=[]
-    cover_page(story,styles)
-    for i,name in enumerate(SCRIPTS):
+    story = []
+    cover_page(story, styles, metas, topic)
+    for i, meta in enumerate(metas):
         story.append(NextPageTemplate(f"s{i}"))
         story.append(PageBreak())
-        title=name[:-3].replace("_"," ")
-        sub_map={
-            "The Bravest Lift":"Vulnerability as strength \u00b7 30s \u00b7 gym / lifestyle",
-            "The Quiet Hour":"5am sovereignty \u00b7 30s \u00b7 calm aesthetic",
-            "Stop Performing":"Authenticity as rebellion \u00b7 30s \u00b7 lifestyle / stoic",
-        }
-        md=(SCRIPTS_DIR/name).read_text(encoding="utf-8")
-        score,hook=extract_highlights(md)
-        section_header(title,sub_map[title],story,styles,score,hook)
-        story.extend(md_to_flowables(md,styles,skip_first_h1=True))
+        section_header(meta["title"], make_subtitle(meta), story, styles,
+                       meta["score"], meta["hook"])
+        story.extend(md_to_flowables(meta["md"], styles, skip_first_h1=True))
 
     # Cover template (no header)
-    cf=Frame(margin,0.7*inch,LETTER[0]-2*margin,LETTER[1]-1.4*inch,id="cover")
-    ct=PageTemplate(id="cover",frames=[cf],onPage=PageDeco("",show_header=False))
+    cf = Frame(margin, 0.7 * inch, LETTER[0] - 2 * margin, LETTER[1] - 1.4 * inch, id="cover")
+    ct = PageTemplate(id="cover", frames=[cf], onPage=PageDeco("", show_header=False))
     doc.addPageTemplates([ct])
     # Script templates
-    for i,name in enumerate(SCRIPTS):
-        f=Frame(margin,0.85*inch,LETTER[0]-2*margin,LETTER[1]-1.7*inch,id=f"s{i}")
-        label=name[:-3].replace("_"," ")
-        t=PageTemplate(id=f"s{i}",frames=[f],onPage=PageDeco(label))
+    for i, meta in enumerate(metas):
+        f = Frame(margin, 0.85 * inch, LETTER[0] - 2 * margin, LETTER[1] - 1.7 * inch, id=f"s{i}")
+        t = PageTemplate(id=f"s{i}", frames=[f], onPage=PageDeco(meta["title"]))
         doc.addPageTemplates([t])
 
     doc.build(story)
-    print(f"Wrote {OUTPUT.resolve()}")
+    print(f"Wrote {Path(output_path).resolve()}")
+    return str(output_path)
 
-if __name__=="__main__":
-    main()
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Premium playbook PDF of 1–3 reel scripts (v5 luxury edition).")
+    parser.add_argument("--scripts", nargs="+", default=None,
+                        help="Paths to 1–3 script .md files "
+                             "(default: legacy two-script selection in SCRIPTS)")
+    parser.add_argument("--output", default=None, help="Output PDF path")
+    parser.add_argument("--topic", default=None,
+                        help="Optional topic line on the cover")
+    args = parser.parse_args(argv)
+
+    if args.scripts is None:
+        # Legacy no-argument default: the user's current two-script selection.
+        scripts = [str(SCRIPTS_DIR / n) for n in SCRIPTS]
+        output = OUTPUT
+    else:
+        scripts = args.scripts
+        if not 1 <= len(scripts) <= 3:
+            print(f"--scripts expects 1–3 files, got {len(scripts)}", file=sys.stderr)
+            return 2
+        if args.output:
+            output = Path(args.output)
+        else:
+            slug = re.sub(r"[^\w\s-]", "", args.topic or "Script_Drafts").strip() \
+                       .replace(" ", "_") or "Script_Drafts"
+            output = Path("draft_result") / f"{slug}.pdf"
+    Path(output).parent.mkdir(parents=True, exist_ok=True)
+    build_pdf(scripts, output, topic=args.topic)
+    return 0
+
+
+if __name__ == "__main__":
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.exit(main())

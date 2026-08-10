@@ -93,98 +93,137 @@ def message_urls(msg: dict) -> list[str]:
 
 
 def process(limit: int, dry_run: bool) -> dict:
-    data = store.load_store()
-    offset = int(data.get("last_update_id", 0) or 0)
-    updates = get_updates(offset + 1 if offset else 0, limit)
-    log(f"[FETCH] {len(updates)} update(s) returned (offset={offset})")
+    # The whole load -> mutate -> save cycle runs under the Telegram store lock,
+    # so a concurrent fetch / status update can never silently drop records.
+    with store.store_lock():
+        data = store.load_store()
+        offset = int(data.get("last_update_id", 0) or 0)
+        updates = get_updates(offset + 1 if offset else 0, limit)
+        log(f"[FETCH] {len(updates)} update(s) returned (offset={offset})")
 
-    new_reels: list[dict] = []
-    already_processed: list[dict] = []
-    errors: list[dict] = []
-    seen_this_run: set[str] = set()
+        new_reels: list[dict] = []
+        already_processed: list[dict] = []
+        errors: list[dict] = []
+        seen_this_run: set[str] = set()
+        excel_pending: list[dict] = []
 
-    scanned = 0
-    skipped_not_allowed = 0
-    draft_requests = 0
-    max_update_id = offset
+        scanned = 0
+        skipped_not_allowed = 0
+        draft_requests = 0
+        max_update_id = offset
 
-    for update in updates:
-        update_id = int(update.get("update_id", 0) or 0)
-        max_update_id = max(max_update_id, update_id)
+        for update in updates:
+            update_id = int(update.get("update_id", 0) or 0)
+            max_update_id = max(max_update_id, update_id)
 
-        msg = next((update[k] for k in MESSAGE_KEYS if k in update), None)
-        if not msg:
-            continue
-        scanned += 1
+            msg = next((update[k] for k in MESSAGE_KEYS if k in update), None)
+            if not msg:
+                continue
+            scanned += 1
 
-        chat_id = (msg.get("chat") or {}).get("id")
-        user_id = (msg.get("from") or {}).get("id")
-        if not config.is_allowed(chat_id, user_id):
-            skipped_not_allowed += 1
-            log(f"   [SKIP] update {update_id}: chat={chat_id} user={user_id} not allowed")
-            continue
-
-        text = message_text(msg)
-        message_id = msg.get("message_id")
-        urls = message_urls(msg)
-        if not urls:
-            continue
-
-        for url in urls:
-            shortcode = store.extract_shortcode(url)
-            if not shortcode:
-                errors.append({"url": url, "error": "could not extract shortcode"})
-                log(f"   [WARN] no shortcode in {url}")
+            chat_id = (msg.get("chat") or {}).get("id")
+            user_id = (msg.get("from") or {}).get("id")
+            if not config.is_allowed(chat_id, user_id):
+                skipped_not_allowed += 1
+                log(f"   [SKIP] update {update_id}: chat={chat_id} user={user_id} not allowed")
                 continue
 
-            if shortcode in seen_this_run:
-                already_processed.append({
-                    "shortcode": shortcode, "url": url,
-                    "reason": "duplicate link in this batch",
+            text = message_text(msg)
+            message_id = msg.get("message_id")
+            urls = message_urls(msg)
+            if not urls:
+                continue
+
+            for url in urls:
+                shortcode = store.extract_shortcode(url)
+                if not shortcode:
+                    errors.append({"url": url, "error": "could not extract shortcode"})
+                    log(f"   [WARN] no shortcode in {url}")
+                    continue
+
+                if shortcode in seen_this_run:
+                    already_processed.append({
+                        "shortcode": shortcode, "url": url,
+                        "reason": "duplicate link in this batch",
+                    })
+                    continue
+
+                # True JSON-store duplicates stay deduped — never re-added.
+                if shortcode in data.get("reels", {}):
+                    reason = store.duplicate_reason(shortcode, data) or "already tracked"
+                    already_processed.append({
+                        "shortcode": shortcode, "url": url, "reason": reason,
+                    })
+                    log(f"   [DUP]  {shortcode} — {reason}")
+                    continue
+
+                draft_requested, draft_count = store.detect_draft_intent(text)
+                seen_this_run.add(shortcode)
+
+                # Known in Excel already: do NOT process again, but still route
+                # through the Excel sync path so Source=TELEGRAM gets stamped.
+                if shortcode in store.excel_shortcodes():
+                    excel_pending.append({
+                        "shortcode": shortcode, "url": url, "message_text": text,
+                    })
+                    already_processed.append({
+                        "shortcode": shortcode, "url": url,
+                        "reason": "already in Brain/Reels_Log.xlsx (Source=TELEGRAM stamped)",
+                        "draft_requested": draft_requested,
+                        "draft_count": draft_count,
+                        "excel": "skipped (dry-run)" if dry_run else "pending",
+                    })
+                    log(f"   [KNOWN] {shortcode} — Source=TELEGRAM stamped")
+                    continue
+
+                if dry_run:
+                    excel_result = "skipped (dry-run)"
+                else:
+                    store.add_reel(url, message_id, text, store=data, save=False)
+                    excel_pending.append({
+                        "shortcode": shortcode, "url": url, "message_text": text,
+                    })
+                    excel_result = "pending"
+
+                new_reels.append({
+                    "shortcode": shortcode,
+                    "url": url,
+                    "message_id": message_id,
+                    "message_text": text,
+                    "draft_requested": draft_requested,
+                    "draft_count": draft_count,
+                    "excel": excel_result,
                 })
-                continue
+                if draft_requested:
+                    draft_requests += 1
+                log(f"   [NEW]  {shortcode}  drafts={draft_count if draft_requested else 0}  excel={excel_result}")
 
-            if store.is_duplicate(shortcode, data):
-                reason = store.duplicate_reason(shortcode, data) or "already tracked"
-                already_processed.append({
-                    "shortcode": shortcode, "url": url, "reason": reason,
-                })
-                log(f"   [DUP]  {shortcode} — {reason}")
-                continue
+        if not dry_run:
+            store.update_last_update_id(max_update_id, store=data, save=False)
+            store.save_store(data)
+            log(f"[STORE] saved — last_update_id={data['last_update_id']}")
 
-            draft_requested, draft_count = store.detect_draft_intent(text)
-            seen_this_run.add(shortcode)
+        # One batched Excel write for every reel that needs sync (new + known).
+        excel_results: dict[str, str] = {}
+        if not dry_run and excel_pending:
+            try:
+                excel_results = store.sync_to_excel_batch(excel_pending)
+            except Exception as e:                    # never lose the store update
+                for item in excel_pending:
+                    errors.append({"shortcode": item["shortcode"],
+                                   "error": f"excel sync failed: {e}"})
+                excel_results = {item["shortcode"]: f"failed: {e}"
+                                 for item in excel_pending}
+            log(f"[EXCEL] batch sync wrote {len(excel_results)} reel(s)")
+        elif dry_run:
+            log("[DRY-RUN] store and Excel left untouched")
 
-            if dry_run:
-                excel_result = "skipped (dry-run)"
-            else:
-                store.add_reel(url, message_id, text, store=data, save=False)
-                try:
-                    excel_result = store.sync_to_excel(shortcode, url, text)
-                except Exception as e:                    # never lose the store update
-                    excel_result = f"failed: {e}"
-                    errors.append({"shortcode": shortcode, "error": f"excel sync failed: {e}"})
-                    log(f"   [ERROR] Excel sync failed for {shortcode}: {e}")
-
-            new_reels.append({
-                "shortcode": shortcode,
-                "url": url,
-                "message_id": message_id,
-                "message_text": text,
-                "draft_requested": draft_requested,
-                "draft_count": draft_count,
-                "excel": excel_result,
-            })
-            if draft_requested:
-                draft_requests += 1
-            log(f"   [NEW]  {shortcode}  drafts={draft_count if draft_requested else 0}  excel={excel_result}")
-
-    if not dry_run:
-        store.update_last_update_id(max_update_id, store=data, save=False)
-        store.save_store(data)
-        log(f"[STORE] saved — last_update_id={data['last_update_id']}")
-    else:
-        log("[DRY-RUN] store and Excel left untouched")
+        # Resolve the per-shortcode excel statuses collected above.
+        for entry in new_reels:
+            entry["excel"] = excel_results.get(entry["shortcode"], "skipped (dry-run)")
+        for entry in already_processed:
+            if "excel" in entry:
+                entry["excel"] = excel_results.get(entry["shortcode"], "skipped (dry-run)")
 
     result = {
         "new_reels": new_reels,

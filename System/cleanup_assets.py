@@ -1,9 +1,17 @@
 """
 cleanup_assets.py  —  STEP 6: delete media for ANALYZED reels only.
 ===================================================================
-Reads Brain/Reels_Log.xlsx and deletes Assets/<shortcode>* files for
-reels whose Status is ANALYZED (their Brain notes are fully populated,
-so the media is no longer needed).
+Reads Brain/Reels_Log.xlsx and deletes the exact media files of reels whose
+Status is ANALYZED AND whose analysis trio is complete and content-valid
+(validated via preflight — deletion is never based on file existence alone).
+
+Only exact patterns are ever deleted — never a broad <shortcode>* glob:
+
+    <shortcode>.mp4
+    <shortcode>_5s.mp4            (optional hook clip)
+    <shortcode>.wav
+    <shortcode>.txt
+    <shortcode>_keyframe_*.jpg
 
 Reels still at PROCESSED keep their media — analysis agents need the
 keyframes and transcripts.
@@ -25,24 +33,49 @@ WORKSPACE        = os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 ASSETS_DIR       = os.path.join(WORKSPACE, "Assets")
 SPREADSHEET_PATH = os.path.join(WORKSPACE, "Brain", "Reels_Log.xlsx")
 
+sys.path.insert(0, os.path.dirname(__file__))
+import preflight
+
 # Files in Assets/ that are NOT reel media and must never be deleted.
 PROTECTED = {"workflow.png"}
 
 
 # ---------------------------------------------------------------------------
 def analyzed_reels() -> list:
+    """ANALYZED shortcodes from the sheet (blank/whitespace ids rejected)."""
     if not os.path.exists(SPREADSHEET_PATH):
         return []
     df = pd.read_excel(SPREADSHEET_PATH)
     if "Status" not in df.columns or "Shortcode" not in df.columns:
         return []
     mask = df["Status"].astype(str).str.upper() == "ANALYZED"
-    return [str(sc).strip() for sc in df[mask]["Shortcode"].dropna().tolist()]
+    return [str(sc).strip() for sc in df[mask]["Shortcode"].dropna().tolist()
+            if str(sc).strip()]
+
+
+def media_files_for(shortcode: str) -> list:
+    """Exact media files for a shortcode — never a broad <id>* match."""
+    files = []
+    for name in (f"{shortcode}.mp4", f"{shortcode}_5s.mp4",
+                 f"{shortcode}.wav", f"{shortcode}.txt"):
+        path = os.path.join(ASSETS_DIR, name)
+        if os.path.exists(path):
+            files.append(path)
+    files += glob.glob(os.path.join(ASSETS_DIR, f"{shortcode}_keyframe_*.jpg"))
+    return [f for f in files if os.path.basename(f) not in PROTECTED]
 
 
 def delete_for(shortcode: str, dry_run: bool) -> int:
-    files = [f for f in glob.glob(os.path.join(ASSETS_DIR, f"{shortcode}*"))
-             if os.path.basename(f) not in PROTECTED]
+    """Delete media for one shortcode, but only after the analysis trio is
+    validated — invalid trios never lose their media."""
+    if not shortcode:
+        return 0
+    ok, issues = preflight.analysis_ok(shortcode)
+    if not ok:
+        codes = ", ".join(i.code for i in issues if i.severity == "error")
+        print(f"   [SKIP-UNVALIDATED] {shortcode}: analysis trio invalid ({codes})")
+        return 0
+    files = media_files_for(shortcode)
     for f in files:
         if dry_run:
             print(f"   [WOULD DELETE] {os.path.basename(f)}")
@@ -71,7 +104,8 @@ def prune_raw_assets(dry_run: bool) -> None:
         return
 
     mask = df["Status"].astype(str).str.upper().isin(["PROCESSED", "ANALYZED"])
-    shortcodes = [str(sc).strip() for sc in df[mask]["Shortcode"].dropna().tolist()]
+    shortcodes = [str(sc).strip() for sc in df[mask]["Shortcode"].dropna().tolist()
+                  if str(sc).strip()]
     if not shortcodes:
         print("[INFO] No PROCESSED/ANALYZED reels found — nothing to prune.")
         return
@@ -80,10 +114,12 @@ def prune_raw_assets(dry_run: bool) -> None:
           f"{'  [DRY RUN]' if dry_run else ''}")
     total = 0
     for sc in shortcodes:
-        # Match <sc>.mp4 and <sc>_5s.mp4 but NOT <sc>_keyframe_*.jpg
-        candidates = [f for f in glob.glob(os.path.join(ASSETS_DIR, f"{sc}*.mp4"))
-                      if "_keyframe" not in os.path.basename(f)
-                      and os.path.basename(f) not in PROTECTED]
+        # Exact names only: <sc>.mp4 and <sc>_5s.mp4, never keyframes.
+        candidates = []
+        for name in (f"{sc}.mp4", f"{sc}_5s.mp4"):
+            path = os.path.join(ASSETS_DIR, name)
+            if os.path.exists(path) and os.path.basename(path) not in PROTECTED:
+                candidates.append(path)
         if not candidates:
             continue
         print(f"   [REEL] {sc}")

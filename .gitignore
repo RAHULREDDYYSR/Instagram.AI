@@ -26,5 +26,9 @@ Scripts/
 # Telegram bot runtime state
 telegram_bot/telegram_reels.json
 
+# Runtime coordination lock
+.instagram_ai_workbook.lock
+.telegram_store.lock
+
 # Local opencode session/config
 .opencode/

@@ -1,6 +1,6 @@
 # Instagram.AI — Agent Guide
 
-Personal pipeline that scrapes Instagram Reels (Apify), ingests media (yt-dlp + ffmpeg), transcribes audio (Whisper), analyzes them with AI agents, and turns proven patterns into reel scripts for the owner's niche: fitness / bodybuilding / gym / lifestyle / masculinity / self-improvement.
+Personal pipeline that scrapes Instagram Reels (Apify), ingests media (yt-dlp + ffmpeg), transcribes audio (Whisper), analyzes them with AI agents, and turns proven patterns into reel scripts for the owner's niche: fitness / bodybuilding / gym / lifestyle / masculinity / self-improvement / relationships.
 
 `main.py` is a placeholder — real work runs through `System/` scripts and the opencode agents/commands below.
 
@@ -15,14 +15,14 @@ Personal pipeline that scrapes Instagram Reels (Apify), ingests media (yt-dlp + 
 | Step | Command | Effect |
 |---|---|---|
 | 1. Scrape | `uv run System/scrape.py --category NICHE\|BRANDING\|ALL [--max-reels N]` | Apify metadata → `Brain/Reels_Log.xlsx`, Status=SCRAPED. Parallel across creators. |
-| 2. Process | `uv run System/process_reels.py [--category …] [--limit N] [--delete-assets] [--skip-transcribe]` | Downloads + extracts media (parallel), creates Brain note, Status=PROCESSED. **Assets are kept**; chains into transcribe.py. |
-| 3. Transcribe | `uv run System/transcribe.py [--shortcode ID] [--limit N]` | Whisper → `Assets/<id>.txt`. Auto-runs at the end of step 2. |
+| 2. Process | `uv run System/process_reels.py [--category …] [--limit N] [--shortcodes ID ...] [--checkpoint-every N] [--delete-assets] [--skip-transcribe]` | Downloads + validates media (parallel), creates Brain note, Status=PROCESSED after scoped transcription. **Assets are kept**; chains into transcribe.py. |
+| 3. Transcribe | `uv run System/transcribe.py [--shortcode ID] [--shortcodes ID ...] [--limit N]` | Whisper → `Assets/<id>.txt`. Auto-runs for the exact successful IDs at the end of step 2. |
 | 4. Analyze | opencode `/analyze` command (agent-driven) | Fills `Brain/Analyses/<id>_*` + the reel's Brain note. |
 | 5. Mark | `uv run System/mark_analyzed.py` | Complete analysis trios → Status=ANALYZED. |
 | 6. Cleanup | `uv run System/cleanup_assets.py [--dry-run]` | Deletes media only for ANALYZED reels. |
 
 - Creator lists live in `System/creators.json` — edit that file, never hardcode usernames in scripts.
-- One-off reel: `uv run System/ingest_reel.py <reel_url>` then `uv run System/transcribe.py --shortcode <id>`.
+- Registered one-off reel: `uv run System/register_oneoff.py <reel_url>` then `uv run System/process_reels.py --shortcode <id>`; this preserves the normal Excel status lifecycle and cleanup eligibility. Raw asset utility: `uv run System/ingest_reel.py <reel_url>` then `uv run System/transcribe.py --shortcode <id>`.
 - Telegram reels: `/tg` — fetches links from your Telegram chat, dedup by shortcode, feeds into the same pipeline (Status=SCRAPED, Source=TELEGRAM in Excel).
 - Status lifecycle: `SCRAPED → PROCESSED (keyframes + .wav + .txt on disk; .mp4 pruned) → ANALYZED (media safe to delete)`.
 

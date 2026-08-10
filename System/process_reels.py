@@ -25,10 +25,11 @@ Usage:
     uv run System/process_reels.py --limit 5               # process N at a time
     uv run System/process_reels.py --workers 4             # download threads
     uv run System/process_reels.py --skip-transcribe       # no Whisper step
+    uv run System/process_reels.py --checkpoint-every 10   # workbook save cadence
     uv run System/process_reels.py --username viralish     # only this creator
 """
 
-import os, sys, json, re, glob, datetime, argparse, shutil
+import os, sys, json, re, glob, datetime, argparse, shutil, tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -37,7 +38,9 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 sys.path.insert(0, os.path.dirname(__file__))
-from ingest_reel import download_reel, extract_assets
+from ingest_reel import download_reel, extract_assets, derived_assets_valid
+from workspace_lock import atomic_path, locked
+import preflight
 
 from dotenv import load_dotenv
 import pandas as pd
@@ -61,6 +64,10 @@ COLUMNS = [
     "Publication Date", "Like Count", "Comments Count", "Shares Count",
     "Caption", "Topic/Summary", "Scraped Date", "Status",
     "Processed Date", "Brain Note Path",
+    # Appended LAST on purpose: Category/Status are addressed positionally
+    # (row[1] / row[13]), so extra columns must never shift them. Keep any
+    # other pre-existing columns (e.g. Source) in the sheet.
+    "Source",
 ]
 
 # ---------------------------------------------------------------------------
@@ -76,39 +83,59 @@ def load_sheet() -> pd.DataFrame:
 
 
 def save_sheet(df: pd.DataFrame) -> None:
-    with pd.ExcelWriter(SPREADSHEET_PATH, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Reels Log")
-        ws = writer.sheets["Reels Log"]
-        from openpyxl.styles import Font, PatternFill, Alignment
-        header_row = ws[1]
-        for cell in header_row:
-            cell.font      = Font(bold=True, color="FFFFFF")
-            cell.fill      = PatternFill("solid", fgColor="1F3864")
-            cell.alignment = Alignment(horizontal="center")
-        ws.freeze_panes = "A2"
-        for row in ws.iter_rows(min_row=2):
-            cat_cell = row[1]
-            if str(cat_cell.value).upper() == "BRANDING":
-                cat_cell.fill = PatternFill("solid", fgColor="FFE699")
-            elif str(cat_cell.value).upper() == "NICHE":
-                cat_cell.fill = PatternFill("solid", fgColor="C6EFCE")
-            st_cell = row[13]
-            val = str(st_cell.value).upper()
-            if val == "PROCESSED":
-                st_cell.fill = PatternFill("solid", fgColor="C6EFCE")
-            elif val == "SCRAPED":
-                st_cell.fill = PatternFill("solid", fgColor="FFEB9C")
-            elif val == "FAILED":
-                st_cell.fill = PatternFill("solid", fgColor="FFC7CE")
-        for col in ws.columns:
-            max_len = max((len(str(cell.value or "")) for cell in col), default=10)
-            ws.column_dimensions[col[0].column_letter].width = min(max_len + 4, 80)
+    directory = os.path.dirname(SPREADSHEET_PATH)
+    os.makedirs(directory, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(prefix=".reels_log_", suffix=".xlsx", dir=directory)
+    os.close(fd)
+    try:
+        with pd.ExcelWriter(temp_path, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name="Reels Log")
+            ws = writer.sheets["Reels Log"]
+            from openpyxl.styles import Font, PatternFill, Alignment
+            header_row = ws[1]
+            for cell in header_row:
+                cell.font      = Font(bold=True, color="FFFFFF")
+                cell.fill      = PatternFill("solid", fgColor="1F3864")
+                cell.alignment = Alignment(horizontal="center")
+            ws.freeze_panes = "A2"
+            for row in ws.iter_rows(min_row=2):
+                cat_cell = row[1]
+                if str(cat_cell.value).upper() == "BRANDING":
+                    cat_cell.fill = PatternFill("solid", fgColor="FFE699")
+                elif str(cat_cell.value).upper() == "NICHE":
+                    cat_cell.fill = PatternFill("solid", fgColor="C6EFCE")
+                st_cell = row[13]
+                val = str(st_cell.value).upper()
+                if val == "PROCESSED":
+                    st_cell.fill = PatternFill("solid", fgColor="C6EFCE")
+                elif val == "SCRAPED":
+                    st_cell.fill = PatternFill("solid", fgColor="FFEB9C")
+                elif val == "FAILED":
+                    st_cell.fill = PatternFill("solid", fgColor="FFC7CE")
+            for col in ws.columns:
+                max_len = max((len(str(cell.value or "")) for cell in col), default=10)
+                ws.column_dimensions[col[0].column_letter].width = min(max_len + 4, 80)
+        os.replace(temp_path, SPREADSHEET_PATH)
+    except Exception:
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+        raise
 
 
 # ---------------------------------------------------------------------------
 def delete_reel_assets(video_id: str) -> int:
-    pattern = os.path.join(ASSETS_DIR, f"{video_id}*")
-    files   = glob.glob(pattern)
+    """Delete only exact media files for this id (no broad <id>* matching)."""
+    if not video_id:
+        return 0
+    files = []
+    for name in (f"{video_id}.mp4", f"{video_id}.wav", f"{video_id}.txt",
+                 f"{video_id}_5s.mp4"):
+        path = os.path.join(ASSETS_DIR, name)
+        if os.path.exists(path):
+            files.append(path)
+    files += glob.glob(os.path.join(ASSETS_DIR, f"{video_id}_keyframe_*.jpg"))
     for f in files:
         try:
             os.remove(f)
@@ -343,11 +370,19 @@ def create_branding_note(shortcode: str, row: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-def create_brain_note(shortcode: str, row: dict) -> str:
+def create_brain_note(shortcode: str, row: dict) -> tuple[str, bool]:
+    """Return (note_path, created). An existing note is NEVER overwritten —
+    it may have been populated by an analyst, and retries must not clobber it."""
     category = str(row.get("Category", "NICHE")).upper()
     if category == "BRANDING":
-        return create_branding_note(shortcode, row)
-    return create_niche_note(shortcode, row)
+        note_path = os.path.join(BRAND_BRAIN_DIR, f"{shortcode}.md")
+        writer    = create_branding_note
+    else:
+        note_path = os.path.join(REELS_BRAIN_DIR, f"{shortcode}.md")
+        writer    = create_niche_note
+    if os.path.exists(note_path):
+        return note_path, False
+    return writer(shortcode, row), True
 
 
 # ---------------------------------------------------------------------------
@@ -361,12 +396,21 @@ def fetch_media(row: pd.Series) -> str:
         raise RuntimeError("missing shortcode or reel URL")
 
     print(f"   [DOWNLOAD] {shortcode} ...")
-    video_path, video_id = download_reel(reel_url, ASSETS_DIR)
+    # Use the Excel shortcode as the canonical output id so derived assets
+    # always land on <shortcode>.wav / <shortcode>_keyframe_*.jpg.
+    video_path, video_id = download_reel(reel_url, ASSETS_DIR, video_id=shortcode)
     if not video_path or not os.path.exists(video_path):
         raise RuntimeError("download failed — video file not found")
 
     print(f"   [EXTRACT]  {shortcode} ...")
     extract_assets(video_path, ASSETS_DIR, video_id)
+
+    # Validate the derived assets BEFORE pruning the source mp4 — a failed
+    # extraction must not look like a successful process.
+    if not derived_assets_valid(ASSETS_DIR, video_id):
+        raise RuntimeError(
+            f"extraction produced invalid assets for {video_id} "
+            "(missing/empty wav or keyframes)")
 
     # Prune the full .mp4 — /analyze only reads keyframes + .wav + .txt.
     # The .wav is needed for transcribe.py; cleanup_assets.py reclaims it
@@ -386,18 +430,19 @@ def finalize_reel(idx: int, row: pd.Series, df: pd.DataFrame,
     shortcode = str(row.get("Shortcode", "")).strip()
     try:
         # 3. Create Brain note -----------------------------------------------
-        note_path = create_brain_note(shortcode, row.to_dict())
+        note_path, created = create_brain_note(shortcode, row.to_dict())
         rel_path  = os.path.relpath(note_path, WORKSPACE)
-        print(f"   [BRAIN]    {rel_path}")
+        print(f"   [BRAIN]    {rel_path}" + ("" if created else " (reused existing)"))
 
         # 4. Optional cleanup (default: KEEP assets for analysis) ------------
         if delete_assets:
             deleted = delete_reel_assets(video_id)
             print(f"   [CLEANUP]  {deleted} files deleted (--delete-assets)")
 
-        # 5. Update Excel row ------------------------------------------------
-        df.at[idx, "Status"]          = "PROCESSED"
-        df.at[idx, "Processed Date"]  = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        # Keep the row SCRAPED until the scoped transcript is validated. This
+        # preserves the documented PROCESSED contract across crashes.
+        df.at[idx, "Status"]          = "SCRAPED"
+        df.at[idx, "Processed Date"]  = ""
         df.at[idx, "Brain Note Path"] = note_path
         return True
 
@@ -409,26 +454,49 @@ def finalize_reel(idx: int, row: pd.Series, df: pd.DataFrame,
 
 
 # ---------------------------------------------------------------------------
-def update_registry_processed(shortcode: str) -> None:
-    if not os.path.exists(REGISTRY_PATH):
+def update_registry_processed(shortcodes: list[str]) -> None:
+    """Atomically add processed shortcodes to _registry.json in ONE write.
+
+    The workbook transaction already holds the workspace lock, so the
+    read-modify-write below cannot race with scrape.py. Writes go through
+    atomic_path: a failed write never truncates a valid registry.
+    """
+    shortcodes = [s for s in (shortcodes or []) if s and s.strip()]
+    if not shortcodes or not os.path.exists(REGISTRY_PATH):
         return
     with open(REGISTRY_PATH, "r", encoding="utf-8") as f:
         reg = json.load(f)
+    changed = False
     for creator in reg.get("creators", []):
-        scraped = creator.get("scraped_reels", [])
-        if shortcode in scraped:
-            processed = set(creator.get("processed_reels", []))
-            processed.add(shortcode)
+        scraped   = set(creator.get("scraped_reels", []))
+        processed = set(creator.get("processed_reels", []))
+        for shortcode in shortcodes:
+            if shortcode in scraped:
+                processed.add(shortcode)
+        if processed != set(creator.get("processed_reels", [])):
             creator["processed_reels"] = list(processed)
-    with open(REGISTRY_PATH, "w", encoding="utf-8") as f:
-        json.dump(reg, f, indent=2)
+            changed = True
+    if not changed:
+        return
+    with atomic_path(REGISTRY_PATH) as temp_path:
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(reg, f, indent=2)
 
 
 # ---------------------------------------------------------------------------
+@locked
 def main(category_filter: str = "ALL", limit: int = 0, workers: int = 3,
          delete_assets: bool = False, skip_transcribe: bool = False,
-         username: str = "", shortcode: str = "") -> None:
+         username: str = "", shortcode: str = "",
+         shortcodes: list[str] | None = None,
+         checkpoint_every: int = 5) -> None:
     df = load_sheet()
+
+    requested_shortcodes = {
+        str(sc).strip() for sc in (shortcodes or []) if str(sc).strip()
+    }
+    if shortcodes is not None and not requested_shortcodes:
+        raise ValueError("--shortcodes requires at least one non-empty shortcode")
 
     # Filter by status
     pending_mask = df["Status"].astype(str).str.upper().isin(["SCRAPED", "FAILED", ""])
@@ -444,7 +512,11 @@ def main(category_filter: str = "ALL", limit: int = 0, workers: int = 3,
         user_mask = df["Username"].astype(str).str.lower() == f"@{handle}"
         pending_mask = pending_mask & user_mask
 
-    # Filter by shortcode if specified
+    # Filter by shortcode if specified. An explicit list is authoritative and
+    # must never fall back to global pending-row selection.
+    if requested_shortcodes:
+        sc_mask = df["Shortcode"].astype(str).str.strip().isin(requested_shortcodes)
+        pending_mask = pending_mask & sc_mask
     if shortcode:
         sc_mask = df["Shortcode"].astype(str).str.strip() == shortcode
         pending_mask = pending_mask & sc_mask
@@ -459,6 +531,8 @@ def main(category_filter: str = "ALL", limit: int = 0, workers: int = 3,
             parts.append(f"@{username.lstrip('@')}")
         if shortcode:
             parts.append(f"shortcode={shortcode}")
+        if requested_shortcodes:
+            parts.append(f"shortcodes={','.join(sorted(requested_shortcodes))}")
         scope = f"[{', '.join(parts)}]" if parts else ""
         print(f"\n[INFO] No SCRAPED reels found {scope}.")
         print(f"       Run 'uv run System/scrape.py' first.")
@@ -471,12 +545,19 @@ def main(category_filter: str = "ALL", limit: int = 0, workers: int = 3,
         scope_parts.append(f"@{username.lstrip('@')}")
     if shortcode:
         scope_parts.append(f"shortcode={shortcode}")
+    if requested_shortcodes:
+        scope_parts.append(f"shortcodes={len(requested_shortcodes)}")
     print(f"\n[PROCESS] {total} reels pending  |  {' | '.join(scope_parts)}  |  cap={cap}")
     print(f"[PARALLEL] {workers} download threads  |  assets kept for analysis")
     print(f"{'='*60}")
 
     targets = [(idx, row) for idx, row in pending.iterrows()][:cap]
     done = failed = 0
+    successful_shortcodes: list[str] = []
+    processed_since_checkpoint = 0
+
+    if checkpoint_every > 0:
+        print(f"[CHECKPOINT] workbook saved every {checkpoint_every} reel(s) + once at the end")
 
     # 1. Download + extract in parallel; finalize on the main thread ---------
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -494,17 +575,31 @@ def main(category_filter: str = "ALL", limit: int = 0, workers: int = 3,
                 df.at[idx, "Processed Date"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
                 success = False
 
-            save_sheet(df)   # save after every reel — progress never lost
             if success:
-                update_registry_processed(shortcode)
+                successful_shortcodes.append(shortcode)
                 done += 1
             else:
                 failed += 1
+
+            # Persist at checkpoints (not after every reel) — in-memory row
+            # updates stay current for all reels, but the workbook is only
+            # restyled/re-written every `checkpoint_every` reels. On a crash
+            # the worst case is losing the last partial checkpoint's rows.
+            processed_since_checkpoint += 1
+            if checkpoint_every > 0 and processed_since_checkpoint >= checkpoint_every:
+                save_sheet(df)
+                print(f"   [CHECKPOINT] workbook saved after {processed_since_checkpoint} reel(s)")
+                processed_since_checkpoint = 0
             print(f"   Progress -> {done} done  |  {failed} failed")
+
+    # Final save so every row updated since the last checkpoint is persisted,
+    # even when the batch ended before a checkpoint boundary.
+    save_sheet(df)
+    print("[SAVE] final workbook write")
 
     # Final summary
     print(f"\n{'='*60}")
-    print(f"[COMPLETE] Processed:{done}  Failed:{failed}")
+    print(f"[COMPLETE] Extracted:{done}  Failed:{failed}")
     for cat in ["NICHE", "BRANDING"]:
         sub = df[df["Category"].astype(str).str.upper() == cat]
         sc  = len(sub[sub["Status"].astype(str).str.upper() == "SCRAPED"])
@@ -516,13 +611,41 @@ def main(category_filter: str = "ALL", limit: int = 0, workers: int = 3,
     # 2. Chain into Whisper transcription ------------------------------------
     if skip_transcribe:
         print("[SKIP] Transcription disabled via --skip-transcribe")
-    elif done > 0:
-        print(f"\n[TRANSCRIBE] Handing off to transcribe.py ...")
+    elif successful_shortcodes:
+        print(f"\n[TRANSCRIBE] Handing off to transcribe.py "
+              f"({len(successful_shortcodes)} reel(s)) ...")
         try:
             import transcribe
-            transcribe.transcribe_pending(limit=0)
+            transcribe.transcribe_pending(shortcodes=successful_shortcodes)
         except Exception as e:
             print(f"[WARN] Transcription step skipped: {e}")
+
+        # Do not leave an extraction marked PROCESSED when its transcript was
+        # missing or invalid. The documented PROCESSED contract includes txt.
+        transcript_failed = []
+        transcript_succeeded = []
+        for rid in successful_shortcodes:
+            txt_path = os.path.join(ASSETS_DIR, f"{rid}.txt")
+            issues = preflight.transcript_issues_for_path(txt_path)
+            if any(issue.severity == "error" for issue in issues):
+                transcript_failed.append(rid)
+                rows = df.index[df["Shortcode"].astype(str).str.strip() == rid]
+                for idx in rows:
+                    df.at[idx, "Status"] = "FAILED"
+                    df.at[idx, "Processed Date"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+            else:
+                rows = df.index[df["Shortcode"].astype(str).str.strip() == rid]
+                for idx in rows:
+                    df.at[idx, "Status"] = "PROCESSED"
+                    df.at[idx, "Processed Date"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+                transcript_succeeded.append(rid)
+        # One registry read/write for the whole scoped batch, never per reel.
+        if transcript_succeeded:
+            update_registry_processed(transcript_succeeded)
+        if transcript_failed or transcript_succeeded:
+            save_sheet(df)
+        if transcript_failed:
+            print(f"[FAILED] Transcript validation: {', '.join(transcript_failed)}")
 
 
 if __name__ == "__main__":
@@ -541,8 +664,13 @@ if __name__ == "__main__":
                         help="Process only this creator handle (filter on Username column)")
     parser.add_argument("--shortcode", default="",
                         help="Process a single reel by shortcode")
+    parser.add_argument("--shortcodes", nargs="+", default=None,
+                        help="Process only these exact reel shortcodes")
+    parser.add_argument("--checkpoint-every", type=int, default=5,
+                        help="Save the Excel sheet every N reels (0 = only at the end)")
     args = parser.parse_args()
     main(category_filter=args.category.upper(), limit=args.limit,
          workers=args.workers, delete_assets=args.delete_assets,
-         skip_transcribe=args.skip_transcribe, username=args.username,
-         shortcode=args.shortcode)
+          skip_transcribe=args.skip_transcribe, username=args.username,
+          shortcode=args.shortcode, shortcodes=args.shortcodes,
+          checkpoint_every=args.checkpoint_every)

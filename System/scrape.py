@@ -20,7 +20,7 @@ Usage:
     uv run System/scrape.py --username viralish      # single creator only
 """
 
-import os, sys, json, re, datetime, argparse
+import os, sys, json, re, datetime, argparse, tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -31,6 +31,8 @@ if hasattr(sys.stderr, "reconfigure"):
 from dotenv import load_dotenv
 from apify_client import ApifyClient
 import pandas as pd
+sys.path.insert(0, os.path.dirname(__file__))
+from workspace_lock import atomic_path, locked
 
 # ---------------------------------------------------------------------------
 WORKSPACE        = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -70,6 +72,8 @@ COLUMNS = [
     "Status",            # SCRAPED | PROCESSED | FAILED
     "Processed Date",
     "Brain Note Path",
+    # Keep source tracking for Telegram and registered one-off reels.
+    "Source",
 ]
 
 os.makedirs(CREATORS_DIR, exist_ok=True)
@@ -82,46 +86,68 @@ def load_sheet() -> pd.DataFrame:
             for col in COLUMNS:
                 if col not in df.columns:
                     df[col] = ""
-            return df[COLUMNS]
-        except Exception:
-            pass
+            # Keep columns introduced by other ingestion paths instead of
+            # silently dropping Source or future outcome metadata.
+            extras = [col for col in df.columns if col not in COLUMNS]
+            return df[COLUMNS + extras]
+        except Exception as exc:
+            raise RuntimeError(
+                f"Could not read {SPREADSHEET_PATH}; refusing to replace it: {exc}"
+            ) from exc
     return pd.DataFrame(columns=COLUMNS)
 
 
 def save_sheet(df: pd.DataFrame) -> None:
-    os.makedirs(os.path.dirname(SPREADSHEET_PATH), exist_ok=True)
-    with pd.ExcelWriter(SPREADSHEET_PATH, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Reels Log")
-        ws = writer.sheets["Reels Log"]
-        # Style: freeze top row, bold headers
-        from openpyxl.styles import Font, PatternFill, Alignment
-        header_row = ws[1]
-        for cell in header_row:
-            cell.font      = Font(bold=True, color="FFFFFF")
-            cell.fill      = PatternFill("solid", fgColor="1F3864")
-            cell.alignment = Alignment(horizontal="center")
-        ws.freeze_panes = "A2"
-        # Colour-code Category column (col B = index 2)
-        for row in ws.iter_rows(min_row=2):
-            cat_cell = row[1]  # Category column
-            if str(cat_cell.value).upper() == "BRANDING":
-                cat_cell.fill = PatternFill("solid", fgColor="FFE699")
-            elif str(cat_cell.value).upper() == "NICHE":
-                cat_cell.fill = PatternFill("solid", fgColor="C6EFCE")
-        # Colour-code Status column (col N = index 13)
-        for row in ws.iter_rows(min_row=2):
-            st_cell = row[13]  # Status column
-            val = str(st_cell.value).upper()
-            if val == "PROCESSED":
-                st_cell.fill = PatternFill("solid", fgColor="C6EFCE")
-            elif val == "SCRAPED":
-                st_cell.fill = PatternFill("solid", fgColor="FFEB9C")
-            elif val == "FAILED":
-                st_cell.fill = PatternFill("solid", fgColor="FFC7CE")
-        # Auto column widths
-        for col in ws.columns:
-            max_len = max((len(str(cell.value or "")) for cell in col), default=10)
-            ws.column_dimensions[col[0].column_letter].width = min(max_len + 4, 80)
+    """Write the styled sheet atomically.
+
+    Uses a sibling temp file with an .xlsx suffix (pandas/openpyxl reject
+    other extensions) and os.replace, so a failed write never truncates a
+    valid workbook.
+    """
+    directory = os.path.dirname(SPREADSHEET_PATH)
+    os.makedirs(directory, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(prefix=".reels_log_", suffix=".xlsx", dir=directory)
+    os.close(fd)
+    try:
+        with pd.ExcelWriter(temp_path, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name="Reels Log")
+            ws = writer.sheets["Reels Log"]
+            # Style: freeze top row, bold headers
+            from openpyxl.styles import Font, PatternFill, Alignment
+            header_row = ws[1]
+            for cell in header_row:
+                cell.font      = Font(bold=True, color="FFFFFF")
+                cell.fill      = PatternFill("solid", fgColor="1F3864")
+                cell.alignment = Alignment(horizontal="center")
+            ws.freeze_panes = "A2"
+            # Colour-code Category column (col B = index 2)
+            for row in ws.iter_rows(min_row=2):
+                cat_cell = row[1]  # Category column
+                if str(cat_cell.value).upper() == "BRANDING":
+                    cat_cell.fill = PatternFill("solid", fgColor="FFE699")
+                elif str(cat_cell.value).upper() == "NICHE":
+                    cat_cell.fill = PatternFill("solid", fgColor="C6EFCE")
+            # Colour-code Status column (col N = index 13)
+            for row in ws.iter_rows(min_row=2):
+                st_cell = row[13]  # Status column
+                val = str(st_cell.value).upper()
+                if val == "PROCESSED":
+                    st_cell.fill = PatternFill("solid", fgColor="C6EFCE")
+                elif val == "SCRAPED":
+                    st_cell.fill = PatternFill("solid", fgColor="FFEB9C")
+                elif val == "FAILED":
+                    st_cell.fill = PatternFill("solid", fgColor="FFC7CE")
+            # Auto column widths
+            for col in ws.columns:
+                max_len = max((len(str(cell.value or "")) for cell in col), default=10)
+                ws.column_dimensions[col[0].column_letter].width = min(max_len + 4, 80)
+        os.replace(temp_path, SPREADSHEET_PATH)
+    except Exception:
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+        raise
     print(f"   [SAVED] {SPREADSHEET_PATH}")
 
 
@@ -133,8 +159,12 @@ def load_registry() -> dict:
 
 
 def save_registry(reg: dict) -> None:
-    with open(REGISTRY_PATH, "w", encoding="utf-8") as f:
-        json.dump(reg, f, indent=2)
+    """Write _registry.json atomically — a failed write never truncates it."""
+    os.makedirs(os.path.dirname(REGISTRY_PATH), exist_ok=True)
+    with atomic_path(REGISTRY_PATH) as temp_path:
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(reg, f, indent=2)
+    print(f"   [REGISTRY] saved {REGISTRY_PATH}")
 
 
 def get_creator_record(reg: dict, username: str):
@@ -144,7 +174,8 @@ def get_creator_record(reg: dict, username: str):
     return None
 
 
-def mark_scraped(reg: dict, username: str, shortcodes: list) -> None:
+def mark_scraped(reg: dict, username: str, shortcodes: list,
+                 save: bool = True) -> None:
     rec = get_creator_record(reg, username)
     if not rec:
         rec = {"username": username, "category": "",
@@ -153,7 +184,8 @@ def mark_scraped(reg: dict, username: str, shortcodes: list) -> None:
         reg["creators"].append(rec)
     existing = set(rec.get("scraped_reels", []))
     rec["scraped_reels"] = list(existing | set(shortcodes))
-    save_registry(reg)
+    if save:
+        save_registry(reg)
 
 
 def shortcode_from_url(url: str) -> str:
@@ -199,6 +231,7 @@ def fetch_creator_items(client: ApifyClient, username: str, max_reels: int):
     return items
 
 
+@locked
 def main(category: str | None = None, max_reels: int = 5, workers: int = 4,
          username: str = "") -> None:
     if not APIFY_API_KEY:
@@ -249,6 +282,7 @@ def main(category: str | None = None, max_reels: int = 5, workers: int = 4,
 
     existing_shortcodes = set(df["Shortcode"].dropna().astype(str).tolist())
     total_new = 0
+    registry_dirty = False
 
     # 1. Fire all Apify runs in parallel (network-bound) ---------------------
     fetched = {}  # username -> (category, items)
@@ -340,7 +374,9 @@ def main(category: str | None = None, max_reels: int = 5, workers: int = 4,
         if new_rows:
             df = pd.concat([df, pd.DataFrame(new_rows, columns=COLUMNS)],
                            ignore_index=True)
-            mark_scraped(reg, username, new_shortcodes)
+            # Batch registry updates in memory; one atomic write at the end.
+            mark_scraped(reg, username, new_shortcodes, save=False)
+            registry_dirty = True
             _fn  = items[0].get("ownerFullName") or username
             _fol = items[0].get("ownerFollowersCount") or 0
             update_creator_note(username, _fn, _fol, new_shortcodes, cat)
@@ -348,6 +384,9 @@ def main(category: str | None = None, max_reels: int = 5, workers: int = 4,
             print(f"\n   [DONE] {len(new_rows)} new reels scraped for @{username}")
         else:
             print(f"\n   [INFO] No new reels for @{username}")
+
+    if registry_dirty:
+        save_registry(reg)
 
     save_sheet(df)
 

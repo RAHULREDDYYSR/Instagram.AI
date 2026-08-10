@@ -29,7 +29,10 @@ import os
 import re
 import sys
 import json
+import time
 import argparse
+import tempfile
+import contextlib
 import datetime
 from urllib.parse import urlparse
 
@@ -39,6 +42,8 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 import pandas as pd
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "System")))
+from workspace_lock import atomic_path, locked
 
 try:                                     # package import (from telegram_bot import store)
     from . import config
@@ -47,6 +52,11 @@ except ImportError:                      # script import (uv run telegram_bot/st
 
 STORE_PATH       = config.STORE_PATH
 SPREADSHEET_PATH = config.SPREADSHEET_PATH
+
+# Small dedicated advisory lock for the JSON store's load->mutate->save cycle,
+# so a concurrent fetch / status update can never silently drop records.
+STORE_LOCK_PATH  = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                ".telegram_store.lock")
 
 # Column order used by System/scrape.py + System/process_reels.py.
 # "Source" is appended LAST on purpose: those scripts address Category/Status by
@@ -75,6 +85,53 @@ REEL_URL_RE = re.compile(
 
 def _now() -> str:
     return datetime.datetime.now().isoformat(timespec="seconds")
+
+
+@contextlib.contextmanager
+def store_lock(timeout: float = 60.0):
+    """Serialize JSON-store read-modify-write transactions across processes.
+
+    Small advisory file lock (stdlib only — no broad dependency). Fetch cycles
+    and status updates run their whole load -> mutate -> save cycle under it,
+    so two simultaneous writers can never overwrite each other's records.
+    """
+    os.makedirs(os.path.dirname(STORE_LOCK_PATH), exist_ok=True)
+    with open(STORE_LOCK_PATH, "a+b") as handle:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"0")
+            handle.flush()
+
+        deadline = time.monotonic() + timeout
+        acquired = False
+        while time.monotonic() < deadline:
+            try:
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except (OSError, BlockingIOError):
+                time.sleep(0.1)
+
+        if not acquired:
+            raise TimeoutError(
+                f"timed out acquiring Telegram store lock: {STORE_LOCK_PATH}")
+
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 # ── JSON store ───────────────────────────────────────────────────────────────
@@ -350,7 +407,12 @@ def _load_sheet() -> pd.DataFrame:
 
 
 def _save_sheet(df: pd.DataFrame) -> None:
-    """Write the sheet back with the same styling System/*.py applies."""
+    """Write the sheet back with the same styling System/*.py applies.
+
+    Written to a sibling temp file with an .xlsx suffix (pandas/openpyxl
+    reject other extensions) and atomically replaced, so a failed write
+    never truncates a valid workbook.
+    """
     from openpyxl.styles import Font, PatternFill, Alignment
 
     os.makedirs(os.path.dirname(SPREADSHEET_PATH), exist_ok=True)
@@ -358,36 +420,103 @@ def _save_sheet(df: pd.DataFrame) -> None:
     cat_idx = columns.index("Category") if "Category" in columns else None
     st_idx = columns.index("Status") if "Status" in columns else None
 
-    with pd.ExcelWriter(SPREADSHEET_PATH, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Reels Log")
-        ws = writer.sheets["Reels Log"]
-        for cell in ws[1]:
-            cell.font = Font(bold=True, color="FFFFFF")
-            cell.fill = PatternFill("solid", fgColor="1F3864")
-            cell.alignment = Alignment(horizontal="center")
-        ws.freeze_panes = "A2"
-        for row in ws.iter_rows(min_row=2):
-            if cat_idx is not None and cat_idx < len(row):
-                cat_cell = row[cat_idx]
-                val = str(cat_cell.value).upper()
-                if val == "BRANDING":
-                    cat_cell.fill = PatternFill("solid", fgColor="FFE699")
-                elif val == "NICHE":
-                    cat_cell.fill = PatternFill("solid", fgColor="C6EFCE")
-            if st_idx is not None and st_idx < len(row):
-                st_cell = row[st_idx]
-                val = str(st_cell.value).upper()
-                if val in ("PROCESSED", "ANALYZED"):
-                    st_cell.fill = PatternFill("solid", fgColor="C6EFCE")
-                elif val == "SCRAPED":
-                    st_cell.fill = PatternFill("solid", fgColor="FFEB9C")
-                elif val == "FAILED":
-                    st_cell.fill = PatternFill("solid", fgColor="FFC7CE")
-        for col in ws.columns:
-            max_len = max((len(str(cell.value or "")) for cell in col), default=10)
-            ws.column_dimensions[col[0].column_letter].width = min(max_len + 4, 80)
+    directory = os.path.dirname(SPREADSHEET_PATH)
+    fd, temp_path = tempfile.mkstemp(prefix=".reels_log_", suffix=".xlsx", dir=directory)
+    os.close(fd)
+    try:
+        with pd.ExcelWriter(temp_path, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name="Reels Log")
+            ws = writer.sheets["Reels Log"]
+            for cell in ws[1]:
+                cell.font = Font(bold=True, color="FFFFFF")
+                cell.fill = PatternFill("solid", fgColor="1F3864")
+                cell.alignment = Alignment(horizontal="center")
+            ws.freeze_panes = "A2"
+            for row in ws.iter_rows(min_row=2):
+                if cat_idx is not None and cat_idx < len(row):
+                    cat_cell = row[cat_idx]
+                    val = str(cat_cell.value).upper()
+                    if val == "BRANDING":
+                        cat_cell.fill = PatternFill("solid", fgColor="FFE699")
+                    elif val == "NICHE":
+                        cat_cell.fill = PatternFill("solid", fgColor="C6EFCE")
+                if st_idx is not None and st_idx < len(row):
+                    st_cell = row[st_idx]
+                    val = str(st_cell.value).upper()
+                    if val in ("PROCESSED", "ANALYZED"):
+                        st_cell.fill = PatternFill("solid", fgColor="C6EFCE")
+                    elif val == "SCRAPED":
+                        st_cell.fill = PatternFill("solid", fgColor="FFEB9C")
+                    elif val == "FAILED":
+                        st_cell.fill = PatternFill("solid", fgColor="FFC7CE")
+            for col in ws.columns:
+                max_len = max((len(str(cell.value or "")) for cell in col), default=10)
+                ws.column_dimensions[col[0].column_letter].width = min(max_len + 4, 80)
+        os.replace(temp_path, SPREADSHEET_PATH)
+    except Exception:
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+        raise
 
 
+def _telegram_row(shortcode: str, url: str, message_text: str) -> dict:
+    caption = (message_text or "").strip()
+    summary = caption[:120] + "..." if len(caption) > 120 else caption
+    return {
+        "Shortcode":        shortcode,
+        "Category":         "NICHE",
+        "Creator Name":     "",
+        "Username":         "",
+        "Reel Link":        url or canonical_url(shortcode),
+        "Video URL":        "",
+        "Publication Date": "",
+        "Like Count":       "",
+        "Comments Count":   "",
+        "Shares Count":     "",
+        "Caption":          caption,
+        "Topic/Summary":    summary,
+        "Scraped Date":     datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "Status":           "SCRAPED",
+        "Processed Date":   "",
+        "Brain Note Path":  "",
+        SOURCE_COLUMN:      "TELEGRAM",
+    }
+
+
+def _apply_telegram_rows(df: pd.DataFrame, reels: list[dict]) -> tuple[pd.DataFrame, dict]:
+    """Mutate `df` for every Telegram reel (no I/O).
+
+    New shortcodes get a Source=TELEGRAM row appended; known shortcodes only
+    get Source=TELEGRAM stamped. Returns (df, {shortcode: result}).
+    """
+    results: dict[str, str] = {}
+    new_rows: list[dict] = []
+    for item in reels:
+        shortcode = str(item.get("shortcode", "") or "").strip()
+        url  = str(item.get("url", "") or "")
+        text = str(item.get("message_text", "") or "")
+        if not shortcode:
+            results[shortcode] = "failed: missing shortcode"
+            continue
+        match = df["Shortcode"].astype(str).str.strip() == shortcode
+        if match.any():
+            already = (df.loc[match, SOURCE_COLUMN].astype(str).str.upper() == "TELEGRAM").all()
+            df.loc[match, SOURCE_COLUMN] = "TELEGRAM"
+            results[shortcode] = "unchanged" if already else "updated"
+        else:
+            new_rows.append(_telegram_row(shortcode, url, text))
+            results[shortcode] = "added"
+    if new_rows:
+        appended = pd.DataFrame(new_rows)
+        # Align with the full sheet column set so existing extras survive.
+        appended = appended.reindex(columns=df.columns, fill_value="")
+        df = pd.concat([df, appended], ignore_index=True)
+    return df, results
+
+
+@locked
 def sync_to_excel(shortcode: str, url: str, message_text: str) -> str:
     """
     Add (or tag) the reel in Brain/Reels_Log.xlsx.
@@ -399,43 +528,32 @@ def sync_to_excel(shortcode: str, url: str, message_text: str) -> str:
     """
     if not shortcode:
         raise ValueError("sync_to_excel() requires a shortcode")
-
     df = _load_sheet()
-    codes = df["Shortcode"].astype(str).str.strip()
-    match = codes == str(shortcode).strip()
-
-    if match.any():
-        already = (df.loc[match, SOURCE_COLUMN].astype(str).str.upper() == "TELEGRAM").all()
-        df.loc[match, SOURCE_COLUMN] = "TELEGRAM"
-        result = "unchanged" if already else "updated"
-    else:
-        caption = (message_text or "").strip()
-        summary = caption[:120] + "..." if len(caption) > 120 else caption
-        row = {
-            "Shortcode":        shortcode,
-            "Category":         "NICHE",
-            "Creator Name":     "",
-            "Username":         "",
-            "Reel Link":        url or canonical_url(shortcode),
-            "Video URL":        "",
-            "Publication Date": "",
-            "Like Count":       "",
-            "Comments Count":   "",
-            "Shares Count":     "",
-            "Caption":          caption,
-            "Topic/Summary":    summary,
-            "Scraped Date":     datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
-            "Status":           "SCRAPED",
-            "Processed Date":   "",
-            "Brain Note Path":  "",
-            SOURCE_COLUMN:      "TELEGRAM",
-        }
-        df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-        result = "added"
-
+    df, results = _apply_telegram_rows(df, [{
+        "shortcode": shortcode, "url": url, "message_text": message_text,
+    }])
     _save_sheet(df)
     excel_shortcodes(refresh=True)
-    return result
+    return results.get(str(shortcode).strip(), "failed")
+
+
+@locked
+def sync_to_excel_batch(reels: list[dict]) -> dict:
+    """
+    Add (or tag) every Telegram reel in ONE workbook read/stylize/write.
+
+    `reels` is a list of {"shortcode", "url", "message_text"} dicts. The sheet
+    is loaded, updated and written once for the whole batch instead of once per
+    reel. Returns {shortcode: "added" | "updated" | "unchanged"} for every reel
+    so callers can still report per-shortcode `excel` status after one write.
+    """
+    if not reels:
+        return {}
+    df = _load_sheet()
+    df, results = _apply_telegram_rows(df, reels)
+    _save_sheet(df)
+    excel_shortcodes(refresh=True)
+    return results
 
 
 # ── CLI (debug helper) ───────────────────────────────────────────────────────

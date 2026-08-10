@@ -131,15 +131,24 @@ flowchart TB
 | Step | Command | Effect |
 |---|---|---|
 | **1. Scrape** | `uv run System/scrape.py --category NICHE\|BRANDING\|ALL [--max-reels N]` | Apify metadata → `Brain/Reels_Log.xlsx`, Status=SCRAPED |
-| **2. Process** | `uv run System/process_reels.py [--shortcode <id>] [--limit N]` | Downloads + extracts media, creates Brain note, Status=PROCESSED |
-| **3. Transcribe** | `uv run System/transcribe.py [--shortcode <id>]` | Whisper → `Assets/<id>.txt` (auto-chains from step 2) |
+| **2. Process** | `uv run System/process_reels.py [--shortcode <id>] [--shortcodes <id> ...] [--limit N] [--checkpoint-every N]` | Downloads + validates/extracts media, creates Brain note, Status=PROCESSED after scoped transcription |
+| **3. Transcribe** | `uv run System/transcribe.py [--shortcode <id>] [--shortcodes <id> ...]` | Whisper → `Assets/<id>.txt` (auto-chains for exact processed IDs) |
 | **4. Analyze** | `/analyze` command (opencode) | Spawns `reel-analyst` agents → writes `Brain/Analyses/<id>_*` |
-| **5. Mark** | `uv run System/mark_analyzed.py` | Complete analysis trios → Status=ANALYZED |
+| **5. Mark** | `uv run System/mark_analyzed.py [--shortcodes <id> ...]` | Valid analysis trios → Status=ANALYZED |
 | **6. Distill** | `/sync` or spawn `pattern-librarian` | Patterns → `Brain/Patterns/`, `Playbook.md`, etc. |
 | **7. Draft** | `/draft <topic>` or `/redraft <reel_url>` | `script-drafter` → `Brain/Scripts/<Title>.md` |
 | **8. PDF** | `/draft` (auto) or spawn `pdf-builder` | Scripts → `draft_result/<Topic>.pdf` |
 
 **Status lifecycle:** `SCRAPED → PROCESSED → ANALYZED`
+
+For a registered one-off reel, run `uv run System/register_oneoff.py <url>`
+then `uv run System/process_reels.py --shortcode <id>`. This keeps the reel in
+the Excel lifecycle and makes it eligible for guarded cleanup. Use
+`System/ingest_reel.py` only as the raw asset utility.
+
+Performance snapshots are append-only via
+`uv run System/record_outcome.py --shortcode <id> ...` and are stored under
+`Brain/Outcomes/` for later score calibration.
 
 ---
 
