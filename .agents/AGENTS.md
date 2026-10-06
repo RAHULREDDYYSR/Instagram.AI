@@ -1,56 +1,27 @@
-# Instagram.AI — Agent System
+# Instagram.AI — Codex Agent System
 
-This document describes the agent system for the Instagram Reel intelligence & script-generation pipeline, and how it maps to the original 8-agent design.
+The main Codex chat is the supervisor. Project-scoped custom roles are standalone `.codex/agents/*.toml` files; native workflow skills are under `.agents/skills/`. Root `AGENTS.md` contains the routing table, model policy, pipeline contract, and shared invariants.
 
-The agents are REAL opencode subagents defined in `.opencode/agent/*.md` and invoked via commands in `.opencode/command/*.md`. The "supervisor" role is played by the primary opencode agent (the chat session itself) — it reads the root `AGENTS.md`, runs commands, and spawns the subagents below.
+## Role boundaries
 
-## Real subagents (`.opencode/agent/`)
+- **reel-ingestor** runs deterministic `System/` pipeline and preflight CLIs via uv. Scripts own workbook/creator registry writes. No manual Brain edits or ad hoc asset deletion.
+- **reel-analyst** owns one shortcode's analysis trio and source-note analysis sections. Inspect actual JPEGs with image tools and read the Whisper transcript. Current extraction covers the first five seconds only. Do not claim full-reel visual coverage or heard vocal qualities. Produce the evidence-backed, source-preserving `ADAPTATION_BRIEF v1`.
+- **pattern-librarian** is the single writer to aggregate Brain/pattern/framework files. Merge evidence into existing canonical concepts; preserve confidence and provenance. Never change rubric or personal style.
+- **script-drafter** writes original, ready-to-shoot scripts using the specialist formatting skill and supplied focus allocation. Respect frozen source pillar/register, `Brain/My_Style.md`, arithmetic rubric scoring, runtime budgets, and unique run/instance paths.
+- **style-critic** critiques/refines the user's idea, explains changes, and proposes personal style changes. Apply `Brain/My_Style.md` edits only after explicit approval of the proposal.
+- **telegram-agent** owns fetch/status/update CLIs and returns exact IDs plus any draft intent. The supervisor coordinates subsequent domain work. Sending a document/message needs explicit user authorization, passed with the assignment.
+- **pdf-builder** uses the public parameterized renderer for validated Markdown paths, verifies PDF preflight, and visually inspects page layout. It does not rewrite scripts, style, workbook, or unrelated code.
+- **coding-agent** maintains project code, dependencies, config, and docs within the assignment. Verification uses uv and read-only/local checks where possible; domain pipeline runs remain delegated to reel-ingestor. No live Brain/state edits.
+- **pipeline-improver** makes small evidence-based instruction changes after an attended processing run. It cannot change model/effort/permission settings, pipeline code, fixed rubric, approved style, or existing run outputs.
 
-### `reel-ingestor` (bash allow / edit deny)
-Runs the deterministic pipeline scripts only: `System/scrape.py`, `System/register_oneoff.py`, `System/process_reels.py`, `System/transcribe.py`, `System/ingest_reel.py`, `System/preflight.py`, `System/mark_analyzed.py`, `System/cleanup_assets.py`. Never hand-edits Brain files or the Excel log. Reports verified asset paths and failures.
+## Skill responsibilities
 
-### `reel-analyst` (edit allow / bash deny)
-Analyzes ONE reel: reads every keyframe (`Assets/<id>_keyframe_*.jpg` — its primary visual evidence), the Whisper transcript (`Assets/<id>.txt`), and the reel's Brain note. Uses the `video-analysis` and `audio-analysis` skills, scores retention against the FIXED `Brain/Rubric.md`, writes `Brain/Analyses/<id>_{visual.json,audio.md,retention.md}`, and fills the reel's Brain note. Flags genuinely novel patterns. Spawn several in parallel for throughput (see `/analyze`).
+Six workflow skills replace the OpenCode commands: `reel-draft`, `reel-redraft`, `reel-refine`, `reel-analyze`, `reel-sync`, and `reel-telegram`. They orchestrate the roles above, preserving sequential dependencies and disjoint ownership during parallel work.
 
-### `pattern-librarian` (edit allow / bash deny)
-Distills completed analyses into durable knowledge. Never duplicates a concept — updates existing `Brain/Patterns/*.md` nodes with new evidence and adjusts confidence. Maintains `Brain/Pattern_Library.md`, `Brain/Playbook.md`, `Brain/Trend_Reports.md`, `Brain/Frameworks/Hook_Database.md`, and `Brain/Frameworks/Script_Framework_Library.md`. Never touches `Brain/Rubric.md` or `Brain/My_Style.md`.
+Specialist skills remain independently discoverable: `video-analysis`, `audio-analysis`, `advanced-reel-script-structure` (stored in `reel-script-structure/`), and `pipeline-self-improvement`. Load only the skills needed for the current assignment.
 
-### `script-drafter` (edit allow / bash deny)
-Generates 2–3 ready-to-shoot drafts on a topic (or adapted from a source reel's structure — never copied). Required reading: `Brain/My_Style.md` (overrides everything), Playbook, Pattern_Library, Hook_Database, Script_Framework_Library, Trend_Reports, Rubric. Formats scripts with the `advanced-reel-script-structure` skill and saves them to `Brain/Scripts/<Title>.md` in the established format (metadata, rubric scoring, alt hooks, timestamped blocks, thumbnail + caption).
+## Migration notes
 
-### `style-critic` (edit allow / bash deny)
-Refines user-pasted scripts: diagnosis vs `Brain/Rubric.md`, refined draft (keeps the user's idea — sharpens it), change log with per-change rationale. Proposes `Brain/My_Style.md` updates and applies them only after explicit user approval.
+The source `.opencode/` setup is local and gitignored. It is retained in the primary checkout for reference; Codex does not load it. Nine roles were migrated, including the previously undocumented coding, PDF, and instruction-improvement roles.
 
-### `telegram-agent` (bash allow / edit allow)
-Fetches Instagram reel links from your Telegram chat, deduplicates by shortcode, detects draft requests, and feeds reels into the existing pipeline. Calls `telegram_bot/fetch_messages.py` (one-shot `getUpdates` API call — no long-polling bot), stores results in `telegram_bot/telegram_reels.json` + syncs to `Brain/Reels_Log.xlsx` (Source=TELEGRAM). Presents suggestions to user, then orchestrates the same agents as `/sync`: `reel-ingestor` → `reel-analyst` → `pattern-librarian` → (optionally) `script-drafter` → `pdf-builder` → `telegram_bot/send_file.py` to deliver PDFs back to the chat. Timeline tracking via `last_update_id` offset ensures no message is read twice.
-
-## Commands (`.opencode/command/`)
-
-| Command | Flow |
-|---|---|
-| `/draft <topic>` | Smart defaults (30s, 3 drafts, SAVE CTA) → `script-drafter` → 2–3 drafts. Asks clarifying questions only when genuinely ambiguous. |
-| `/redraft <reel_url>` | register/process → `reel-analyst` → frozen brief + parallel `pattern-librarian` and isolated `script-drafter` agents → validated PDF. |
-| `/refine <script>` | `style-critic` → diagnosis + refined draft + change log. My_Style edits need approval. |
-| `/analyze [shortcode\|pending]` | Exact transcript/preflight → up to 4 `reel-analyst` subagents in parallel → scoped `mark_analyzed.py` and one batch `pattern-librarian`. |
-| `/sync [NICHE\|BRANDING\|ALL]` | scrape → process → transcribe → parallel analyze → distill, end to end. |
-| `/tg [--dry-run] [--status]` | `telegram-agent` → fetch reel links, dedup, preserve exact shortcode manifest, process/analyze, update Telegram status, and optionally draft validated PDFs. |
-
-## Mapping from the original 8-agent design
-
-| Original concept | Now |
-|---|---|
-| Supervisor Agent | Primary opencode agent (the chat session) |
-| Ingestion Agent | `reel-ingestor` |
-| Visual + Audio + Retention Agents | `reel-analyst` (one agent, both skills + rubric) |
-| Pattern Intelligence Agent | `pattern-librarian` |
-| Knowledge Graph Agent | `pattern-librarian` |
-| Script Generator Agent | `script-drafter` |
-| Feedback Evolution Agent | `style-critic` |
-| Telegram Input Agent | `telegram-agent` |
-
-## Invariants
-
-- `Brain/Rubric.md` is FIXED — no agent ever edits it.
-- `Brain/My_Style.md` is edited only by `style-critic`, only with user approval.
-- Media in `Assets/` is deleted only by `System/cleanup_assets.py`, only for ANALYZED reels.
-- Agents must not claim to have watched video or listened to audio — keyframes and Whisper transcripts are the only evidence.
+OpenCode permission switches do not translate to Codex file/tool enforcement. The role scopes above are instructions; runtime permissions inherit the parent session. On hosts lacking custom `agent_type`, the supervisor must pass the actual TOML developer instructions and explicit model/effort to a fresh-context child. Task names alone do not establish bindings.
