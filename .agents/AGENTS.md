@@ -4,7 +4,7 @@ The main Codex chat is the supervisor. Project-scoped custom roles are standalon
 
 ## Role boundaries
 
-- **reel-ingestor** runs deterministic `System/` pipeline and preflight CLIs via uv. Scripts own workbook/creator registry writes. No manual Brain edits or ad hoc asset deletion.
+- **reel-ingestor** runs deterministic `System/` pipeline and preflight CLIs via uv. Scripts own workbook/creator registry writes. At the successful top-level completion barrier, runs `cleanup_assets.py --all-assets`, emptying only Assets contents while retaining Brain/results/database. No manual Brain edits or ad hoc asset deletion.
 - **reel-analyst** owns one shortcode's analysis trio and source-note analysis sections. Inspect actual JPEGs with image tools and read the Whisper transcript. Current extraction covers the first five seconds only. Do not claim full-reel visual coverage or heard vocal qualities. Produce the evidence-backed, source-preserving `ADAPTATION_BRIEF v1`.
 - **pattern-librarian** is the single writer to aggregate Brain/pattern/framework files. Merge evidence into existing canonical concepts; preserve confidence and provenance. Never change rubric or personal style.
 - **script-drafter** writes original, ready-to-shoot scripts using the specialist formatting skill and supplied focus allocation. Respect frozen source pillar/register, `Brain/My_Style.md`, arithmetic rubric scoring, runtime budgets, and unique run/instance paths.

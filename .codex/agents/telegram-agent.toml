@@ -90,6 +90,7 @@ uv run telegram_bot/send_file.py --file "<pdf_path>" --caption "Scripts based on
 
 ### Step 4 — Report
 Summarize: reels processed, reels analyzed, patterns updated, scripts drafted, PDFs sent to Telegram.
+After the parent supervisor verifies satisfactory saved results, completed state writes and any requested validated delivery, delegate mandatory Assets-only full cleanup to reel-ingestor under the root completion barrier. Nested intake never clears media before the parent finishes; Brain/database/bot state and output PDFs persist.
 
 ## Timeline / dedup guarantees
 - `telegram_bot/telegram_reels.json` tracks `last_update_id` — never re-reads old Telegram messages

@@ -70,9 +70,12 @@ Lifecycle: `SCRAPED → PROCESSED → ANALYZED`. The supervisor delegates pipeli
 | Validate one script | `uv run System/preflight.py script --file <draft.md>` |
 | Build PDF | `uv run System/generate_scripts_pdf.py --scripts <1-3 drafts.md> --output <unique.pdf> --topic '<topic>'` |
 | Validate PDF | `uv run System/preflight.py pdf --file <output.pdf> --title '<topic>'` |
-| Cleanup eligible media | `uv run System/cleanup_assets.py --dry-run` before authorized deletion |
+| Successful run cleanup | `uv run System/cleanup_assets.py --all-assets` (optional `--dry-run` preview) |
+| Legacy selective cleanup | `uv run System/cleanup_assets.py` for validated ANALYZED media only |
 
 Processing transcribes only successful IDs and normally prunes the full `.mp4`, retaining JPEGs, WAV, and transcript. This branch extracts **one frame per second for the first five seconds**. Images establish opening visuals; a full transcript does not establish full visual coverage or heard vocal delivery. Reports distinguish observed evidence, inference, and missing evidence.
+
+After all requested results are saved, validation and visual QA pass, and all agents finish using media, workflows automatically empty **only the contents of `Assets/`**. This includes hidden entries, subdirectories, links, transcripts, and `workflow.png`; the Assets folder remains. Brain notes/analyses/patterns/scripts, the Excel database, creator registry, Telegram state, and PDFs outside Assets persist. Failed/blocked/unfinished runs, pending revisions or explicit review holds retain assets; nested workflows defer cleanup to the top-level completion barrier. Status-only and dry-run requests do not delete files. Symlink/mounted/redirected Assets roots are rejected, and child symlink targets are never followed. Already analyzed sources can reuse saved analyses/briefs after media cleanup without changing database status.
 
 `Brain/Rubric.md` is fixed. Retention uses its eight factors and a mean rounded half-up to one decimal. `Brain/My_Style.md` overrides generic formatting defaults; changes require explicit approval of the proposed style edits. Source redrafts preserve pillar/register/subject unless you explicitly request a different domain.
 

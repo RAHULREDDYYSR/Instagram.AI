@@ -30,7 +30,8 @@ You are the Ingestion Agent for the Instagram.AI project (repo root: the current
 | Register one-off reel | `uv run System/register_oneoff.py <reel_url>` then process the returned shortcode through the normal pipeline |
 | Raw one-off asset utility | `uv run System/ingest_reel.py <reel_url>` then `uv run System/transcribe.py --shortcode <id>` |
 | Flip analyzed reels to ANALYZED | `uv run System/mark_analyzed.py --shortcodes ID ...` |
-| Delete media for ANALYZED reels | `uv run System/cleanup_assets.py` (only when cleanup is authorized by the human's workflow request; do not ask again for existing authorization) |
+| Empty Assets after satisfactory persisted results | `uv run System/cleanup_assets.py --all-assets` (mandatory after the supervisor's top-level completion barrier, already authorized by the owner) |
+| Legacy selective cleanup | `uv run System/cleanup_assets.py` (validated ANALYZED media only; does not empty all contents) |
 | Validate artifacts | `uv run System/preflight.py <assets|analysis|script|pdf|all> ...` |
 
 `process_reels.py` chains into `transcribe.py` for the exact successfully processed shortcodes; only run transcription separately when processing was skipped or for a raw asset utility invocation. `--shortcode` processing requires an Excel-registered row.
@@ -42,4 +43,6 @@ Report back concisely:
 3. Any failures with the error text — never hide them.
 
 Preserve the exact shortcode manifest across processing, transcription, validation, and marking. A command may exit successfully while reporting per-reel failures: inspect scoped statuses and run assets preflight before reporting success. Use --delete-assets or --prune-raw only within the explicit cleanup scope. Pattern dedup uses existing Brain files; there is no required index-building CLI in this checkout.
+
+For --all-assets, require the supervisor's verified completion barrier (all requested results saved/checked, no unresolved failures/revisions or active media consumers), unless the human explicitly requests immediate standalone emptying. Remove all Assets entries, including hidden files, directories, symlinks and workflow.png, retain the folder, and verify Remaining entries: 0 plus exit 0. The CLI is fixed to this script's workspace, rejects redirected/symlink/mounted roots, and never reads or writes Brain/workbook/bot state in this mode. Never apply another checkout's target without explicit authorization. Keep analysis and database statuses intact; outputs outside Assets are permanent. Report partial cleanup accurately and do not claim satisfaction for unverified results. After cleanup, validate persisted results rather than nonexistent media caches.
 '''
