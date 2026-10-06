@@ -1,0 +1,11 @@
+# Project supervisor defaults. Custom agents set their own model and effort.
+model = "gpt-6.1-sol"
+model_reasoning_effort = "high"
+
+[features]
+multi_agent = true
+
+[agents]
+enabled = true
+# Concurrent spawned-agent threads; the primary supervisor is excluded.
+max_concurrent_threads_per_session = 4
